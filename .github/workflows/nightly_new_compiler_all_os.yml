@@ -90,13 +90,18 @@ jobs:
           esac
           echo "TAG_NAME_COMPONENTS=$YEAR-$MONTH-$DAY" >> $GITHUB_ENV
 
-      - name: Print CPU model
-        run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            wmic cpu get name
-          else
-            sysctl -a | grep machdep.cpu.brand_string || lscpu | grep "Model name"
-          fi
+      - name: Print CPU model (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: Get-WmiObject -Class Win32_Processor | Select-Object -ExpandProperty Name
+
+      - name: Print CPU model (macOS)
+        if: runner.os == 'macOS'
+        run: sysctl -a | grep machdep.cpu.brand_string || true
+
+      - name: Print CPU model (Linux)
+        if: runner.os == 'Linux'
+        run: lscpu | grep "Model name"
 
       - name: build release
         uses: ./roc-src/.github/actions/flaky-retry
@@ -305,13 +310,18 @@ jobs:
           find roc-src/src -mindepth 1 ! -path "roc-src/src/PROFILING*" -exec rm -rf {} +
           find roc-src/src/PROFILING -mindepth 1 ! -name "bench_repeated_check.roc" -exec rm -rf {} +
 
-      - name: Print CPU model
-        run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            wmic cpu get name
-          else
-            sysctl -a | grep machdep.cpu.brand_string || lscpu | grep "Model name"
-          fi
+      - name: Print CPU model (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: Get-WmiObject -Class Win32_Processor | Select-Object -ExpandProperty Name
+
+      - name: Print CPU model (macOS)
+        if: runner.os == 'macOS'
+        run: sysctl -a | grep machdep.cpu.brand_string || true
+
+      - name: Print CPU model (Linux)
+        if: runner.os == 'Linux'
+        run: lscpu | grep "Model name"
 
       - name: Test archive (Unix)
         if: runner.os != 'Windows'
