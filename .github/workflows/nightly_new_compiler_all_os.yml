@@ -63,7 +63,7 @@ jobs:
         working-directory: roc-src
 
       - name: get commit SHA
-        run: echo "SHA=$(git rev-parse --short "$GITHUB_SHA")" >> $GITHUB_ENV
+        run: echo "SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
         working-directory: roc-src
 
       - name: get date
@@ -141,24 +141,6 @@ jobs:
           path: ${{ env.RELEASE_FOLDER_NAME }}.zip
           retention-days: 4
 
-      - name: Clean workspace for test
-        run: |
-          find . -mindepth 1 -maxdepth 1 ! -name "${{ env.RELEASE_FOLDER_NAME }}.tar.gz" ! -name "${{ env.RELEASE_FOLDER_NAME }}.zip" ! -name "roc-src" -exec rm -rf {} +
-          find roc-src/src -mindepth 1 ! -path "roc-src/src/PROFILING*" -exec rm -rf {} +
-          find roc-src/src/PROFILING -mindepth 1 ! -name "bench_repeated_check.roc" -exec rm -rf {} +
-
-      - name: Test archive (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          tar -xzf "${{ env.RELEASE_FOLDER_NAME }}.tar.gz"
-          ./${{ env.RELEASE_FOLDER_NAME }}/roc check roc-src/src/PROFILING/bench_repeated_check.roc
-
-      - name: Test archive (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          7z x "${{ env.RELEASE_FOLDER_NAME }}.zip"
-          ./${{ env.RELEASE_FOLDER_NAME }}/roc check roc-src/src/PROFILING/bench_repeated_check.roc
-
   publish-release:
     name: Publish release to GitHub
     needs: build-and-package
@@ -177,7 +159,7 @@ jobs:
           path: roc-src
 
       - name: get commit SHA
-        run: echo "SHA=$(git rev-parse --short "$GITHUB_SHA")" >> $GITHUB_ENV
+        run: echo "SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
         working-directory: roc-src
 
       - name: get date
@@ -217,5 +199,112 @@ jobs:
           body: |
             Nightly build of new Roc compiler from roc-lang/roc commit [${{ env.SHA }}](https://github.com/roc-lang/roc/commit/${{ env.SHA }}).
             Note: we still recommend using the [old compiler release](https://github.com/roc-lang/roc/releases/tag/alpha4-rolling) for now.
-          draft: true
+          draft: false
           prerelease: false
+
+  test-archives:
+    name: Test nightly release archives
+    needs: publish-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            artifact_name: macos_x86_64
+          - os: macos-15
+            artifact_name: macos_apple_silicon
+          - os: ubuntu-22.04
+            artifact_name: linux_x86_64
+          - os: ubuntu-24.04
+            artifact_name: linux_x86_64
+          - os: ubuntu-24.04-arm
+            artifact_name: linux_arm64
+          - os: windows-2022
+            artifact_name: windows_x86_64
+          - os: windows-2025
+            artifact_name: windows_x86_64
+          - os: windows-11-arm
+            artifact_name: windows_arm64
+
+    defaults:
+      run:
+        shell: bash
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout roc-lang/roc
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
+        with:
+          repository: roc-lang/roc
+          path: roc-src
+
+      - name: get commit SHA
+        run: echo "SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+        working-directory: roc-src
+
+      - name: get date
+        run: echo "DATE=$(date "+%Y-%m-%d")" >> $GITHUB_ENV
+
+      - name: format tag name components
+        run: |
+          YEAR=$(echo $DATE | cut -d- -f1)
+          MONTH_NUM=$(echo $DATE | cut -d- -f2)
+          DAY=$(echo $DATE | cut -d- -f3)
+          case $MONTH_NUM in
+            01) MONTH="january" ;;
+            02) MONTH="february" ;;
+            03) MONTH="march" ;;
+            04) MONTH="april" ;;
+            05) MONTH="may" ;;
+            06) MONTH="june" ;;
+            07) MONTH="july" ;;
+            08) MONTH="august" ;;
+            09) MONTH="september" ;;
+            10) MONTH="october" ;;
+            11) MONTH="november" ;;
+            12) MONTH="december" ;;
+          esac
+          echo "TAG_NAME_COMPONENTS=$YEAR-$MONTH-$DAY" >> $GITHUB_ENV
+
+      - name: build file name
+        env:
+          DATE: ${{ env.DATE }}
+          SHA: ${{ env.SHA }}
+        run: echo "RELEASE_FOLDER_NAME=new_roc_nightly-${{ matrix.artifact_name }}-$DATE-$SHA" >> $GITHUB_ENV
+
+      - name: Download release archive (Unix)
+        if: runner.os != 'Windows'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -L -H "Authorization: token $GITHUB_TOKEN" -o "${{ env.RELEASE_FOLDER_NAME }}.tar.gz" \
+            "https://github.com/${{ github.repository }}/releases/download/nightly-${{ env.TAG_NAME_COMPONENTS }}-${{ env.SHA }}/${{ env.RELEASE_FOLDER_NAME }}.tar.gz"
+
+      - name: Download release archive (Windows)
+        if: runner.os == 'Windows'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -L -H "Authorization: token $GITHUB_TOKEN" -o "${{ env.RELEASE_FOLDER_NAME }}.zip" `
+            "https://github.com/${{ github.repository }}/releases/download/nightly-${{ env.TAG_NAME_COMPONENTS }}-${{ env.SHA }}/${{ env.RELEASE_FOLDER_NAME }}.zip"
+
+      - name: Clean workspace for test
+        run: |
+          find . -mindepth 1 -maxdepth 1 ! -name "${{ env.RELEASE_FOLDER_NAME }}.tar.gz" ! -name "${{ env.RELEASE_FOLDER_NAME }}.zip" ! -name "roc-src" -exec rm -rf {} +
+          find roc-src/src -mindepth 1 ! -path "roc-src/src/PROFILING*" -exec rm -rf {} +
+          find roc-src/src/PROFILING -mindepth 1 ! -name "bench_repeated_check.roc" -exec rm -rf {} +
+
+      - name: Test archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          tar -xzf "${{ env.RELEASE_FOLDER_NAME }}.tar.gz"
+          ./${{ env.RELEASE_FOLDER_NAME }}/roc check roc-src/src/PROFILING/bench_repeated_check.roc
+
+      - name: Test archive (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          7z x "${{ env.RELEASE_FOLDER_NAME }}.zip"
+          ./${{ env.RELEASE_FOLDER_NAME }}/roc check roc-src/src/PROFILING/bench_repeated_check.roc
