@@ -69,6 +69,27 @@ jobs:
       - name: get date
         run: echo "DATE=$(date "+%Y-%m-%d")" >> $GITHUB_ENV
 
+      - name: format tag name components
+        run: |
+          YEAR=$(echo $DATE | cut -d- -f1)
+          MONTH_NUM=$(echo $DATE | cut -d- -f2)
+          DAY=$(echo $DATE | cut -d- -f3)
+          case $MONTH_NUM in
+            01) MONTH="january" ;;
+            02) MONTH="february" ;;
+            03) MONTH="march" ;;
+            04) MONTH="april" ;;
+            05) MONTH="may" ;;
+            06) MONTH="june" ;;
+            07) MONTH="july" ;;
+            08) MONTH="august" ;;
+            09) MONTH="september" ;;
+            10) MONTH="october" ;;
+            11) MONTH="november" ;;
+            12) MONTH="december" ;;
+          esac
+          echo "TAG_NAME_COMPONENTS=$YEAR-$MONTH-$DAY" >> $GITHUB_ENV
+
       - name: build release
         uses: ./roc-src/.github/actions/flaky-retry
         with:
@@ -158,11 +179,9 @@ jobs:
         uses: softprops/action-gh-release@6da8fa9354ddfdc4aeace5fc48d7f679b5214090 # ratchet:softprops/action-gh-release@v2.4.1
         with:
           files: artifacts/**/*
-          tag_name: nightly-${{ github.run_number }}
+          tag_name: nightly-${{ env.TAG_NAME_COMPONENTS }}-${{ env.SHA }}
           body: |
-            Nightly build of Roc compiler from roc-lang/roc
-
-            Build number: ${{ github.run_number }}
-            Build date: ${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
+            Nightly build of new Roc compiler from roc-lang/roc commit [${{ env.SHA }}](https://github.com/roc-lang/roc/commit/${{ env.SHA }}).
+            Note: we still recommend using the [old compiler release](https://github.com/roc-lang/roc/releases/tag/alpha4-rolling) for now.
           draft: true
           prerelease: false
