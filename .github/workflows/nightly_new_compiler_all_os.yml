@@ -170,6 +170,40 @@ jobs:
       - name: Checkout nightlies repo
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
 
+      - name: Checkout roc-lang/roc
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
+        with:
+          repository: roc-lang/roc
+          path: roc-src
+
+      - name: get commit SHA
+        run: echo "SHA=$(git rev-parse --short "$GITHUB_SHA")" >> $GITHUB_ENV
+        working-directory: roc-src
+
+      - name: get date
+        run: echo "DATE=$(date "+%Y-%m-%d")" >> $GITHUB_ENV
+
+      - name: format tag name components
+        run: |
+          YEAR=$(echo $DATE | cut -d- -f1)
+          MONTH_NUM=$(echo $DATE | cut -d- -f2)
+          DAY=$(echo $DATE | cut -d- -f3)
+          case $MONTH_NUM in
+            01) MONTH="january" ;;
+            02) MONTH="february" ;;
+            03) MONTH="march" ;;
+            04) MONTH="april" ;;
+            05) MONTH="may" ;;
+            06) MONTH="june" ;;
+            07) MONTH="july" ;;
+            08) MONTH="august" ;;
+            09) MONTH="september" ;;
+            10) MONTH="october" ;;
+            11) MONTH="november" ;;
+            12) MONTH="december" ;;
+          esac
+          echo "TAG_NAME_COMPONENTS=$YEAR-$MONTH-$DAY" >> $GITHUB_ENV
+
       - name: Download all artifacts
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # ratchet:actions/download-artifact@v5.0.0
         with:
