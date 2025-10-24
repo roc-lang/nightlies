@@ -75,18 +75,18 @@ jobs:
           MONTH_NUM=$(echo $DATE | cut -d- -f2)
           DAY=$(echo $DATE | cut -d- -f3)
           case $MONTH_NUM in
-            01) MONTH="january" ;;
-            02) MONTH="february" ;;
-            03) MONTH="march" ;;
-            04) MONTH="april" ;;
-            05) MONTH="may" ;;
-            06) MONTH="june" ;;
-            07) MONTH="july" ;;
-            08) MONTH="august" ;;
-            09) MONTH="september" ;;
-            10) MONTH="october" ;;
-            11) MONTH="november" ;;
-            12) MONTH="december" ;;
+            01) MONTH="January" ;;
+            02) MONTH="February" ;;
+            03) MONTH="March" ;;
+            04) MONTH="April" ;;
+            05) MONTH="May" ;;
+            06) MONTH="June" ;;
+            07) MONTH="July" ;;
+            08) MONTH="August" ;;
+            09) MONTH="September" ;;
+            10) MONTH="October" ;;
+            11) MONTH="November" ;;
+            12) MONTH="December" ;;
           esac
           echo "TAG_NAME_COMPONENTS=$YEAR-$MONTH-$DAY" >> $GITHUB_ENV
 
@@ -171,18 +171,18 @@ jobs:
           MONTH_NUM=$(echo $DATE | cut -d- -f2)
           DAY=$(echo $DATE | cut -d- -f3)
           case $MONTH_NUM in
-            01) MONTH="january" ;;
-            02) MONTH="february" ;;
-            03) MONTH="march" ;;
-            04) MONTH="april" ;;
-            05) MONTH="may" ;;
-            06) MONTH="june" ;;
-            07) MONTH="july" ;;
-            08) MONTH="august" ;;
-            09) MONTH="september" ;;
-            10) MONTH="october" ;;
-            11) MONTH="november" ;;
-            12) MONTH="december" ;;
+            01) MONTH="January" ;;
+            02) MONTH="February" ;;
+            03) MONTH="March" ;;
+            04) MONTH="April" ;;
+            05) MONTH="May" ;;
+            06) MONTH="June" ;;
+            07) MONTH="July" ;;
+            08) MONTH="August" ;;
+            09) MONTH="September" ;;
+            10) MONTH="October" ;;
+            11) MONTH="November" ;;
+            12) MONTH="December" ;;
           esac
           echo "TAG_NAME_COMPONENTS=$YEAR-$MONTH-$DAY" >> $GITHUB_ENV
 
@@ -254,18 +254,18 @@ jobs:
           MONTH_NUM=$(echo $DATE | cut -d- -f2)
           DAY=$(echo $DATE | cut -d- -f3)
           case $MONTH_NUM in
-            01) MONTH="january" ;;
-            02) MONTH="february" ;;
-            03) MONTH="march" ;;
-            04) MONTH="april" ;;
-            05) MONTH="may" ;;
-            06) MONTH="june" ;;
-            07) MONTH="july" ;;
-            08) MONTH="august" ;;
-            09) MONTH="september" ;;
-            10) MONTH="october" ;;
-            11) MONTH="november" ;;
-            12) MONTH="december" ;;
+            01) MONTH="January" ;;
+            02) MONTH="February" ;;
+            03) MONTH="March" ;;
+            04) MONTH="April" ;;
+            05) MONTH="May" ;;
+            06) MONTH="June" ;;
+            07) MONTH="July" ;;
+            08) MONTH="August" ;;
+            09) MONTH="September" ;;
+            10) MONTH="October" ;;
+            11) MONTH="November" ;;
+            12) MONTH="December" ;;
           esac
           echo "TAG_NAME_COMPONENTS=$YEAR-$MONTH-$DAY" >> $GITHUB_ENV
 
@@ -288,7 +288,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          curl -L -H "Authorization: token $GITHUB_TOKEN" -o "${{ env.RELEASE_FOLDER_NAME }}.zip" `
+          curl -L -H "Authorization: token $GITHUB_TOKEN" -o "${{ env.RELEASE_FOLDER_NAME }}.zip" \
             "https://github.com/${{ github.repository }}/releases/download/nightly-${{ env.TAG_NAME_COMPONENTS }}-${{ env.SHA }}/${{ env.RELEASE_FOLDER_NAME }}.zip"
 
       - name: Clean workspace for test
