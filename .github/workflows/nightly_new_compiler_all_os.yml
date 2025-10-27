@@ -1,0 +1,335 @@
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * *"
+
+name: Nightly release for new compiler
+
+# Do not add permissions here! Configure them at the job level!
+permissions: {}
+
+jobs:
+  build-and-package:
+    name: build and package nightly release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            artifact_name: macos_x86_64
+          - os: macos-15
+            artifact_name: macos_apple_silicon
+          - os: ubuntu-22.04
+            artifact_name: linux_x86_64
+          - os: ubuntu-24.04-arm
+            artifact_name: linux_arm64
+          - os: windows-2022
+            artifact_name: windows_x86_64
+          - os: windows-11-arm
+            artifact_name: windows_arm64
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout roc-lang/roc
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
+        with:
+          repository: roc-lang/roc
+          path: roc-src
+
+      - uses: mlugg/setup-zig@8d6198c65fb0feaa111df26e6b467fea8345e46f # ratchet:mlugg/setup-zig@v2.0.5
+        with:
+          version: 0.15.2
+          use-cache: true
+
+      # temp fix, see https://roc.zulipchat.com/#narrow/channel/395097-compiler-development/topic/CI/near/542085291
+      - name: delete llvm-config
+        if: startsWith(matrix.os, 'ubuntu') && endsWith(matrix.os, '-arm')
+        run: |
+          sudo rm /usr/lib/llvm-18/bin/llvm-config
+
+      - name: Setup MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # ratchet:ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: ${{ matrix.os == 'windows-11-arm' && 'arm64' || 'x64' }}
+
+      - name: create version.txt
+        run: ./ci/write_version.sh
+        working-directory: roc-src
+
+      - name: get commit SHA
+        run: echo "SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+        working-directory: roc-src
+
+      - name: get date
+        run: echo "DATE=$(date "+%Y-%m-%d")" >> $GITHUB_ENV
+
+      - name: format tag name components
+        run: |
+          YEAR=$(echo $DATE | cut -d- -f1)
+          MONTH_NUM=$(echo $DATE | cut -d- -f2)
+          DAY=$(echo $DATE | cut -d- -f3)
+          case $MONTH_NUM in
+            01) MONTH="January" ;;
+            02) MONTH="February" ;;
+            03) MONTH="March" ;;
+            04) MONTH="April" ;;
+            05) MONTH="May" ;;
+            06) MONTH="June" ;;
+            07) MONTH="July" ;;
+            08) MONTH="August" ;;
+            09) MONTH="September" ;;
+            10) MONTH="October" ;;
+            11) MONTH="November" ;;
+            12) MONTH="December" ;;
+          esac
+          echo "TAG_NAME_COMPONENTS=$YEAR-$MONTH-$DAY" >> $GITHUB_ENV
+
+      - name: Print CPU model (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: Get-WmiObject -Class Win32_Processor | Select-Object -ExpandProperty Name
+
+      - name: Print CPU model (macOS)
+        if: runner.os == 'macOS'
+        run: sysctl -a | grep machdep.cpu.brand_string || true
+
+      - name: Print CPU model (Linux)
+        if: runner.os == 'Linux'
+        run: lscpu | grep "Model name"
+
+      - name: build release
+        uses: ./roc-src/.github/actions/flaky-retry
+        with:
+          command: 'cd roc-src && zig build roc -Doptimize=ReleaseFast'
+          error_string_contains: 'EndOfStream'
+          retry_count: 3
+
+      - name: build file name
+        env:
+          DATE: ${{ env.DATE }}
+          SHA: ${{ env.SHA }}
+        run: echo "RELEASE_FOLDER_NAME=roc_nightly-${{ matrix.artifact_name }}-$DATE-$SHA" >> $GITHUB_ENV
+
+      - name: Package release
+        run: |
+          mkdir -p ${{ env.RELEASE_FOLDER_NAME }}
+          cp ./roc-src/zig-out/bin/roc ${{ env.RELEASE_FOLDER_NAME }}/
+          cp ./roc-src/LICENSE ./roc-src/legal_details ${{ env.RELEASE_FOLDER_NAME }}/
+
+      - name: Compress release (Unix)
+        if: runner.os != 'Windows'
+        run: tar -czvf "${{ env.RELEASE_FOLDER_NAME }}.tar.gz" ${{ env.RELEASE_FOLDER_NAME }}
+
+      - name: Compress release (Windows)
+        if: runner.os == 'Windows'
+        run: 7z a -tzip "${{ env.RELEASE_FOLDER_NAME }}.zip" ${{ env.RELEASE_FOLDER_NAME }}
+
+      - name: Calculate archive hash for security purposes (Unix)
+        if: runner.os != 'Windows'
+        run: sha256sum ${{ env.RELEASE_FOLDER_NAME }}.tar.gz
+
+      - name: Calculate archive hash for security purposes (Windows)
+        if: runner.os == 'Windows'
+        run: sha256sum ${{ env.RELEASE_FOLDER_NAME }}.zip
+
+      - name: Upload roc nightly archive (Unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.RELEASE_FOLDER_NAME }}.tar.gz
+          path: ${{ env.RELEASE_FOLDER_NAME }}.tar.gz
+          retention-days: 4
+
+      - name: Upload roc nightly archive (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.RELEASE_FOLDER_NAME }}.zip
+          path: ${{ env.RELEASE_FOLDER_NAME }}.zip
+          retention-days: 4
+
+  publish-release:
+    name: Publish release to GitHub
+    needs: build-and-package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout nightlies repo
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
+
+      - name: Checkout roc-lang/roc
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
+        with:
+          repository: roc-lang/roc
+          path: roc-src
+
+      - name: get commit SHA
+        run: echo "SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+        working-directory: roc-src
+
+      - name: get date
+        run: echo "DATE=$(date "+%Y-%m-%d")" >> $GITHUB_ENV
+
+      - name: format tag name components
+        run: |
+          YEAR=$(echo $DATE | cut -d- -f1)
+          MONTH_NUM=$(echo $DATE | cut -d- -f2)
+          DAY=$(echo $DATE | cut -d- -f3)
+          case $MONTH_NUM in
+            01) MONTH="January" ;;
+            02) MONTH="February" ;;
+            03) MONTH="March" ;;
+            04) MONTH="April" ;;
+            05) MONTH="May" ;;
+            06) MONTH="June" ;;
+            07) MONTH="July" ;;
+            08) MONTH="August" ;;
+            09) MONTH="September" ;;
+            10) MONTH="October" ;;
+            11) MONTH="November" ;;
+            12) MONTH="December" ;;
+          esac
+          echo "TAG_NAME_COMPONENTS=$YEAR-$MONTH-$DAY" >> $GITHUB_ENV
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # ratchet:actions/download-artifact@v5.0.0
+        with:
+          path: ./artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@6da8fa9354ddfdc4aeace5fc48d7f679b5214090 # ratchet:softprops/action-gh-release@v2.4.1
+        with:
+          files: artifacts/**/*
+          tag_name: nightly-${{ env.TAG_NAME_COMPONENTS }}-${{ env.SHA }}
+          body: |
+            Nightly build of new Roc compiler from roc-lang/roc commit [${{ env.SHA }}](https://github.com/roc-lang/roc/commit/${{ env.SHA }}).
+            Note: we still recommend using the [old compiler release](https://github.com/roc-lang/roc/releases/tag/alpha4-rolling) for now.
+          draft: false
+          prerelease: false
+
+  test-archives:
+    name: Test nightly release archives
+    needs: publish-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            artifact_name: macos_x86_64
+          - os: macos-15
+            artifact_name: macos_apple_silicon
+          - os: ubuntu-22.04
+            artifact_name: linux_x86_64
+          - os: ubuntu-24.04
+            artifact_name: linux_x86_64
+          - os: ubuntu-24.04-arm
+            artifact_name: linux_arm64
+          - os: windows-2022
+            artifact_name: windows_x86_64
+          - os: windows-2025
+            artifact_name: windows_x86_64
+          - os: windows-11-arm
+            artifact_name: windows_arm64
+
+    defaults:
+      run:
+        shell: bash
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout roc-lang/roc
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
+        with:
+          repository: roc-lang/roc
+          path: roc-src
+
+      - name: get commit SHA
+        run: echo "SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+        working-directory: roc-src
+
+      - name: get date
+        run: echo "DATE=$(date "+%Y-%m-%d")" >> $GITHUB_ENV
+
+      - name: format tag name components
+        run: |
+          YEAR=$(echo $DATE | cut -d- -f1)
+          MONTH_NUM=$(echo $DATE | cut -d- -f2)
+          DAY=$(echo $DATE | cut -d- -f3)
+          case $MONTH_NUM in
+            01) MONTH="January" ;;
+            02) MONTH="February" ;;
+            03) MONTH="March" ;;
+            04) MONTH="April" ;;
+            05) MONTH="May" ;;
+            06) MONTH="June" ;;
+            07) MONTH="July" ;;
+            08) MONTH="August" ;;
+            09) MONTH="September" ;;
+            10) MONTH="October" ;;
+            11) MONTH="November" ;;
+            12) MONTH="December" ;;
+          esac
+          echo "TAG_NAME_COMPONENTS=$YEAR-$MONTH-$DAY" >> $GITHUB_ENV
+
+      - name: build file name
+        env:
+          DATE: ${{ env.DATE }}
+          SHA: ${{ env.SHA }}
+        run: echo "RELEASE_FOLDER_NAME=roc_nightly-${{ matrix.artifact_name }}-$DATE-$SHA" >> $GITHUB_ENV
+
+      - name: Download release archive (Unix)
+        if: runner.os != 'Windows'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -L -H "Authorization: token $GITHUB_TOKEN" -o "${{ env.RELEASE_FOLDER_NAME }}.tar.gz" \
+            "https://github.com/${{ github.repository }}/releases/download/nightly-${{ env.TAG_NAME_COMPONENTS }}-${{ env.SHA }}/${{ env.RELEASE_FOLDER_NAME }}.tar.gz"
+
+      - name: Download release archive (Windows)
+        if: runner.os == 'Windows'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -L -H "Authorization: token $GITHUB_TOKEN" -o "${{ env.RELEASE_FOLDER_NAME }}.zip" \
+            "https://github.com/${{ github.repository }}/releases/download/nightly-${{ env.TAG_NAME_COMPONENTS }}-${{ env.SHA }}/${{ env.RELEASE_FOLDER_NAME }}.zip"
+
+      - name: Clean workspace for test
+        run: |
+          find . -mindepth 1 -maxdepth 1 ! -name "${{ env.RELEASE_FOLDER_NAME }}.tar.gz" ! -name "${{ env.RELEASE_FOLDER_NAME }}.zip" ! -name "roc-src" -exec rm -rf {} +
+          find roc-src/src -mindepth 1 ! -path "roc-src/src/PROFILING*" -exec rm -rf {} +
+          find roc-src/src/PROFILING -mindepth 1 ! -name "bench_repeated_check.roc" -exec rm -rf {} +
+
+      - name: Print CPU model (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: Get-WmiObject -Class Win32_Processor | Select-Object -ExpandProperty Name
+
+      - name: Print CPU model (macOS)
+        if: runner.os == 'macOS'
+        run: sysctl -a | grep machdep.cpu.brand_string || true
+
+      - name: Print CPU model (Linux)
+        if: runner.os == 'Linux'
+        run: lscpu | grep "Model name"
+
+      - name: Test archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          tar -xzf "${{ env.RELEASE_FOLDER_NAME }}.tar.gz"
+          ./${{ env.RELEASE_FOLDER_NAME }}/roc check roc-src/src/PROFILING/bench_repeated_check.roc
+
+      - name: Test archive (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          7z x "${{ env.RELEASE_FOLDER_NAME }}.zip"
+          ./${{ env.RELEASE_FOLDER_NAME }}/roc check roc-src/src/PROFILING/bench_repeated_check.roc
