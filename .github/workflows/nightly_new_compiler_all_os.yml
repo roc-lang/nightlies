@@ -1,4 +1,5 @@
 on:
+#  pull_request:
   workflow_dispatch:
   schedule:
     - cron: "0 9 * * *"
@@ -203,16 +204,18 @@ jobs:
         with:
           path: ./artifacts
 
-      - name: Create Release
-        uses: softprops/action-gh-release@6da8fa9354ddfdc4aeace5fc48d7f679b5214090 # ratchet:softprops/action-gh-release@v2.4.1
-        with:
-          files: artifacts/**/*
-          tag_name: nightly-${{ env.TAG_NAME_COMPONENTS }}-${{ env.SHA }}
-          body: |
-            Nightly build of new Roc compiler from roc-lang/roc commit [${{ env.SHA }}](https://github.com/roc-lang/roc/commit/${{ env.SHA }}).
-            Note: we still recommend using the [old compiler release](https://github.com/roc-lang/roc/releases/tag/alpha4-rolling) for now.
-          draft: false
-          prerelease: false
+      - name: Create Release with gh CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="nightly-${{ env.TAG_NAME_COMPONENTS }}-${{ env.SHA }}"
+          BODY="Nightly build of new Roc compiler from roc-lang/roc commit [${{ env.SHA }}](https://github.com/roc-lang/roc/commit/${{ env.SHA }}).\nNote: we still recommend using the [old compiler release](https://github.com/roc-lang/roc/releases/tag/alpha4-rolling) for now."
+      
+          # Create the release (non-draft, non-prerelease)
+          gh release create "$TAG" artifacts/**/* \
+            --title "$TAG" \
+            --notes "$BODY" \
+            --latest=false
 
   test-archives:
     name: Test nightly release archives
