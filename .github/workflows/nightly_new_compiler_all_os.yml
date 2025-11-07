@@ -106,7 +106,7 @@ jobs:
       - name: build release
         uses: ./roc-src/.github/actions/flaky-retry
         with:
-          command: 'cd roc-src && zig build roc -Doptimize=ReleaseFast'
+          command: 'cd roc-src && zig build roc -Doptimize=ReleaseFast -Dcpu=x86_64_v3'
           error_string_contains: 'EndOfStream'
           retry_count: 3
 
