@@ -8,7 +8,6 @@ name: Nightly release for new compiler
 
 # Do not add permissions here! Configure them at the job level!
 permissions: {}
-
 jobs:
   build-and-package:
     name: build and package nightly release
@@ -19,16 +18,22 @@ jobs:
         include:
           - os: macos-15-intel
             artifact_name: macos_x86_64
+            cpu_flag: -Dcpu=x86_64_v3
           - os: macos-15
             artifact_name: macos_apple_silicon
+            cpu_flag: ''
           - os: ubuntu-22.04
             artifact_name: linux_x86_64
+            cpu_flag: -Dcpu=x86_64_v3
           - os: ubuntu-24.04-arm
             artifact_name: linux_arm64
+            cpu_flag: ''
           - os: windows-2022
             artifact_name: windows_x86_64
+            cpu_flag: -Dcpu=x86_64_v3
           - os: windows-11-arm
             artifact_name: windows_arm64
+            cpu_flag: ''
 
     defaults:
       run:
@@ -106,7 +111,7 @@ jobs:
       - name: build release
         uses: ./roc-src/.github/actions/flaky-retry
         with:
-          command: 'cd roc-src && zig build roc -Doptimize=ReleaseFast -Dcpu=x86_64_v3'
+          command: 'cd roc-src && zig build roc -Doptimize=ReleaseFast ${{ matrix.cpu_flag }}'
           error_string_contains: 'EndOfStream'
           retry_count: 3
 
