@@ -220,7 +220,7 @@ jobs:
           gh release create "$TAG" artifacts/**/* \
             --title "$TAG" \
             --notes "$BODY" \
-            --latest=false
+            --latest=true
 
   test-archives:
     name: Test nightly release archives
