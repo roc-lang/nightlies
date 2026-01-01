@@ -214,7 +214,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="nightly-${{ env.TAG_NAME_COMPONENTS }}-${{ env.SHA }}"
-          BODY="Nightly build of new Roc compiler from roc-lang/roc commit [${{ env.SHA }}](https://github.com/roc-lang/roc/commit/${{ env.SHA }}).\nNote: we still recommend using the [old compiler release](https://github.com/roc-lang/roc/releases/tag/alpha4-rolling) for now."
+          BODY="Nightly build of new Roc compiler from roc-lang/roc commit [${{ env.SHA }}](https://github.com/roc-lang/roc/commit/${{ env.SHA }}). Note: we still recommend using the [old compiler release](https://github.com/roc-lang/roc/releases/tag/alpha4-rolling) for now."
       
           # Create the release (non-draft, non-prerelease)
           gh release create "$TAG" artifacts/**/* \
