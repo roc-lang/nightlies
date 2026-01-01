@@ -8,6 +8,9 @@ name: Nightly release for new compiler
 
 # Do not add permissions here! Configure them at the job level!
 permissions: {}
+
+env:
+  ZIG_VERSION: 0.15.2
 jobs:
   build-and-package:
     name: build and package nightly release
@@ -48,7 +51,7 @@ jobs:
 
       - uses: mlugg/setup-zig@8d6198c65fb0feaa111df26e6b467fea8345e46f # ratchet:mlugg/setup-zig@v2.0.5
         with:
-          version: 0.15.2
+          version: ${{ env.ZIG_VERSION }}
           use-cache: true
 
       # temp fix, see https://roc.zulipchat.com/#narrow/channel/395097-compiler-development/topic/CI/near/542085291
@@ -159,9 +162,39 @@ jobs:
           path: ${{ env.RELEASE_FOLDER_NAME }}.zip
           retention-days: 4
 
+  build-playground:
+    name: build playground wasm
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout roc-lang/roc
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
+        with:
+          repository: roc-lang/roc
+          path: roc-src
+
+      - uses: mlugg/setup-zig@8d6198c65fb0feaa111df26e6b467fea8345e46f # ratchet:mlugg/setup-zig@v2.0.5
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: true
+
+      - name: build playground
+        uses: ./roc-src/.github/actions/flaky-retry
+        with:
+          command: 'cd roc-src && zig build playground'
+          error_string_contains: 'EndOfStream'
+          retry_count: 3
+
+      - name: Upload playground.wasm
+        uses: actions/upload-artifact@v4
+        with:
+          name: playground.wasm
+          path: roc-src/zig-out/bin/playground.wasm
+          retention-days: 4
+
   publish-release:
     name: Publish release to GitHub
-    needs: build-and-package
+    needs: [build-and-package, build-playground]
     runs-on: ubuntu-latest
     permissions:
       contents: write
