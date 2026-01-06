@@ -1,5 +1,5 @@
 on:
-#  pull_request:
+  pull_request:
   workflow_dispatch:
   schedule:
     - cron: "0 9 * * *"
@@ -28,9 +28,11 @@ jobs:
           - os: ubuntu-22.04
             artifact_name: linux_x86_64
             cpu_flag: -Dcpu=x86_64_v3
+            target_flag: -Dtarget=x86_64-linux-musl
           - os: ubuntu-24.04-arm
             artifact_name: linux_arm64
             cpu_flag: ''
+            target_flag: -Dtarget=aarch64-linux-musl
           - os: windows-2022
             artifact_name: windows_x86_64
             cpu_flag: -Dcpu=x86_64_v3
@@ -114,7 +116,7 @@ jobs:
       - name: build release
         uses: ./roc-src/.github/actions/flaky-retry
         with:
-          command: 'cd roc-src && zig build roc -Doptimize=ReleaseFast ${{ matrix.cpu_flag }}'
+          command: 'cd roc-src && zig build roc -Doptimize=ReleaseFast ${{ matrix.cpu_flag }} ${{ matrix.target_flag }}'
           error_string_contains: 'EndOfStream'
           retry_count: 3
 
@@ -194,6 +196,7 @@ jobs:
 
   publish-release:
     name: Publish release to GitHub
+    if: github.event_name != 'pull_request'
     needs: [build-and-package, build-playground]
     runs-on: ubuntu-latest
     permissions:
@@ -257,6 +260,7 @@ jobs:
 
   test-archives:
     name: Test nightly release archives
+    if: github.event_name != 'pull_request'
     needs: publish-release
     runs-on: ${{ matrix.os }}
     strategy:
