@@ -374,3 +374,18 @@ jobs:
         run: |
           7z x "${{ env.RELEASE_FOLDER_NAME }}.zip"
           ./${{ env.RELEASE_FOLDER_NAME }}/roc check roc-src/src/PROFILING/bench_repeated_check.roc
+
+      - name: Checkout nightlies repo for hello_world_test.roc
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
+        with:
+          path: nightlies-repo
+
+      - name: Run hello_world_test.roc (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          ./${{ env.RELEASE_FOLDER_NAME }}/roc nightlies-repo/hello_world_test.roc
+
+      - name: Run hello_world_test.roc (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          ./${{ env.RELEASE_FOLDER_NAME }}/roc nightlies-repo/hello_world_test.roc
