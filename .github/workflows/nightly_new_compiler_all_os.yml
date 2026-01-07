@@ -132,6 +132,11 @@ jobs:
           cp ./roc-src/zig-out/bin/roc ${{ env.RELEASE_FOLDER_NAME }}/
           cp ./roc-src/LICENSE ./roc-src/legal_details ${{ env.RELEASE_FOLDER_NAME }}/
 
+      - name: Bundle Darwin sysroot (macOS only)
+        if: runner.os == 'macOS'
+        run: |
+          cp -r ./roc-src/src/cli/darwin ${{ env.RELEASE_FOLDER_NAME }}/
+
       - name: Compress release (Unix)
         if: runner.os != 'Windows'
         run: tar -czvf "${{ env.RELEASE_FOLDER_NAME }}.tar.gz" ${{ env.RELEASE_FOLDER_NAME }}
