@@ -109,7 +109,7 @@ jobs:
         uses: ./roc-src/.github/actions/flaky-retry
         with:
           command: 'cd roc-src && zig build release'
-          error_string_contains: 'EndOfStream'
+          error_string_contains: 'EndOfStream|build.zig.zon'
           retry_count: 3
 
       - name: build file name
@@ -181,7 +181,7 @@ jobs:
         uses: ./roc-src/.github/actions/flaky-retry
         with:
           command: 'cd roc-src && zig build playground -Doptimize=ReleaseSmall'
-          error_string_contains: 'EndOfStream'
+          error_string_contains: 'EndOfStream|build.zig.zon'
           retry_count: 3
 
       - name: Upload playground.wasm
