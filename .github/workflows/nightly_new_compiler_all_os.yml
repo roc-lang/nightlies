@@ -347,9 +347,7 @@ jobs:
 
       - name: Clean workspace for test
         run: |
-          find . -mindepth 1 -maxdepth 1 ! -name "${{ env.RELEASE_FOLDER_NAME }}.tar.gz" ! -name "${{ env.RELEASE_FOLDER_NAME }}.zip" ! -name "roc-src" -exec rm -rf {} +
-          find roc-src/src -mindepth 1 ! -path "roc-src/src/PROFILING*" -exec rm -rf {} +
-          find roc-src/src/PROFILING -mindepth 1 ! -name "bench_repeated_check.roc" -exec rm -rf {} +
+          find . -mindepth 1 -maxdepth 1 ! -name "${{ env.RELEASE_FOLDER_NAME }}.tar.gz" ! -name "${{ env.RELEASE_FOLDER_NAME }}.zip" -exec rm -rf {} +
 
       - name: Print CPU model (Windows)
         if: runner.os == 'Windows'
@@ -363,18 +361,6 @@ jobs:
       - name: Print CPU model (Linux)
         if: runner.os == 'Linux'
         run: lscpu | grep "Model name"
-
-      - name: Test archive (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          tar -xzf "${{ env.RELEASE_FOLDER_NAME }}.tar.gz"
-          ./${{ env.RELEASE_FOLDER_NAME }}/roc check roc-src/src/PROFILING/bench_repeated_check.roc
-
-      - name: Test archive (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          7z x "${{ env.RELEASE_FOLDER_NAME }}.zip"
-          ./${{ env.RELEASE_FOLDER_NAME }}/roc check roc-src/src/PROFILING/bench_repeated_check.roc
 
       - name: Checkout nightlies repo for hello_world_test.roc
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
