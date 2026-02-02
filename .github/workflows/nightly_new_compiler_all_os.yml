@@ -362,6 +362,16 @@ jobs:
         if: runner.os == 'Linux'
         run: lscpu | grep "Model name"
 
+      - name: Decompress release archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          tar -xzf "${{ env.RELEASE_FOLDER_NAME }}.tar.gz"
+
+      - name: Decompress release archive (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          7z x "${{ env.RELEASE_FOLDER_NAME }}.zip"
+
       - name: Checkout nightlies repo for hello_world_test.roc
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
         with:
