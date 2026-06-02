@@ -10,7 +10,7 @@ name: Nightly release for new compiler
 permissions: {}
 
 env:
-  ZIG_VERSION: 0.15.2
+  ZIG_VERSION: 0.16.0
 jobs:
   resolve-roc-ref:
     name: Resolve roc commit and date
@@ -23,7 +23,7 @@ jobs:
 
     steps:
       - name: Checkout roc-lang/roc
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
         with:
           repository: roc-lang/roc
 
@@ -84,13 +84,13 @@ jobs:
 
     steps:
       - name: Checkout roc-lang/roc
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
         with:
           repository: roc-lang/roc
           ref: ${{ needs.resolve-roc-ref.outputs.sha_full }}
           path: roc-src
 
-      - uses: mlugg/setup-zig@8d6198c65fb0feaa111df26e6b467fea8345e46f # ratchet:mlugg/setup-zig@v2.0.5
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # ratchet:mlugg/setup-zig@v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
           use-cache: true
@@ -184,13 +184,13 @@ jobs:
 
     steps:
       - name: Checkout roc-lang/roc
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
         with:
           repository: roc-lang/roc
           ref: ${{ needs.resolve-roc-ref.outputs.sha_full }}
           path: roc-src
 
-      - uses: mlugg/setup-zig@8d6198c65fb0feaa111df26e6b467fea8345e46f # ratchet:mlugg/setup-zig@v2.0.5
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # ratchet:mlugg/setup-zig@v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
           use-cache: true
@@ -222,7 +222,7 @@ jobs:
 
     steps:
       - name: Checkout nightlies repo
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
 
       - name: Download all artifacts
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # ratchet:actions/download-artifact@v5.0.0
@@ -327,7 +327,7 @@ jobs:
           7z x "${{ env.RELEASE_FOLDER_NAME }}.zip"
 
       - name: Checkout nightlies repo for hello_world_test.roc
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
         with:
           path: nightlies-repo
 
