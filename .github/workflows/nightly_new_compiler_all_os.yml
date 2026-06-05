@@ -75,8 +75,8 @@ jobs:
             artifact_name: linux_arm64
           - os: windows-2022
             artifact_name: windows_x86_64
-          - os: windows-11-arm
-            artifact_name: windows_arm64
+          #- os: windows-11-arm
+          #  artifact_name: windows_arm64
 
     defaults:
       run:
@@ -273,8 +273,8 @@ jobs:
             artifact_name: windows_x86_64
           - os: windows-2025
             artifact_name: windows_x86_64
-          - os: windows-11-arm
-            artifact_name: windows_arm64
+          #- os: windows-11-arm
+          #  artifact_name: windows_arm64
 
     defaults:
       run:
