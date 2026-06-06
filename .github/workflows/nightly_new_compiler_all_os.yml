@@ -107,10 +107,6 @@ jobs:
         with:
           arch: ${{ matrix.os == 'windows-11-arm' && 'arm64' || 'x64' }}
 
-      - name: create version.txt
-        run: ./ci/write_version.sh
-        working-directory: roc-src
-
       - name: Print CPU model (Windows)
         if: runner.os == 'Windows'
         shell: powershell
