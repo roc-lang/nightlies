@@ -123,7 +123,7 @@ jobs:
       - name: build release
         uses: ./roc-src/.github/actions/flaky-retry
         with:
-          command: 'cd roc-src && zig build release'
+          command: 'cd roc-src && zig build build-release'
           error_string_contains: 'EndOfStream|build.zig.zon'
           retry_count: 3
 
