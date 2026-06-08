@@ -194,7 +194,7 @@ jobs:
       - name: build playground
         uses: ./roc-src/.github/actions/flaky-retry
         with:
-          command: 'cd roc-src && zig build playground -Doptimize=ReleaseSmall'
+          command: 'cd roc-src && zig build build-playground -Doptimize=ReleaseSmall'
           error_string_contains: 'EndOfStream|build.zig.zon'
           retry_count: 3
 
