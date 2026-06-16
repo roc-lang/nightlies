@@ -174,7 +174,7 @@ jobs:
           retention-days: 4
 
   build-wasm-artifacts:
-    name: build playground and compiler wasm
+    name: build playground and roc compiler wasm
     needs: resolve-roc-ref
     runs-on: ubuntu-latest
 
@@ -205,7 +205,7 @@ jobs:
           path: roc-src/zig-out/bin/playground.wasm
           retention-days: 4
 
-      - name: Build compiler wasm
+      - name: Build roc compiler wasm
         uses: ./roc-src/.github/actions/flaky-retry
         with:
           command: 'cd roc-src && zig build build-echo-wasm -Doptimize=ReleaseSmall'
