@@ -205,6 +205,14 @@ jobs:
           path: roc-src/zig-out/bin/playground.wasm
           retention-days: 4
 
+      # upload the compiler wasm (echo platform) built alongside the playground
+      - name: Upload compiler wasm
+        uses: actions/upload-artifact@v4
+        with:
+          name: roc_compiler.wasm
+          path: roc-src/zig-out/lib/echo.wasm
+          retention-days: 4
+
   publish-release:
     name: Publish release to GitHub
     if: github.event_name != 'pull_request'
