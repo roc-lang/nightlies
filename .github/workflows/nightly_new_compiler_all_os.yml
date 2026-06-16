@@ -206,7 +206,7 @@ jobs:
           retention-days: 4
 
       # upload the compiler wasm (echo platform) built alongside the playground
-      - name: Upload compiler wasm
+      - name: Upload roc_compiler.wasm
         uses: actions/upload-artifact@v4
         with:
           name: roc_compiler.wasm
