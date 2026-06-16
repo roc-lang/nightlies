@@ -173,8 +173,8 @@ jobs:
           path: ${{ env.RELEASE_FOLDER_NAME }}.zip
           retention-days: 4
 
-  build-playground:
-    name: build playground wasm
+  build-wasm-artifacts:
+    name: build playground and compiler wasm
     needs: resolve-roc-ref
     runs-on: ubuntu-latest
 
@@ -191,7 +191,7 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
           use-cache: true
 
-      - name: build playground
+      - name: Build playground
         uses: ./roc-src/.github/actions/flaky-retry
         with:
           command: 'cd roc-src && zig build build-playground -Doptimize=ReleaseSmall'
@@ -205,7 +205,13 @@ jobs:
           path: roc-src/zig-out/bin/playground.wasm
           retention-days: 4
 
-      # upload the compiler wasm (echo platform) built alongside the playground
+      - name: Build compiler wasm
+        uses: ./roc-src/.github/actions/flaky-retry
+        with:
+          command: 'cd roc-src && zig build build-echo-wasm -Doptimize=ReleaseSmall'
+          error_string_contains: 'EndOfStream|build.zig.zon'
+          retry_count: 3
+
       - name: Upload roc_compiler.wasm
         uses: actions/upload-artifact@v4
         with:
@@ -216,7 +222,7 @@ jobs:
   publish-release:
     name: Publish release to GitHub
     if: github.event_name != 'pull_request'
-    needs: [resolve-roc-ref, build-and-package, build-playground]
+    needs: [resolve-roc-ref, build-and-package, build-wasm-artifacts]
     runs-on: ubuntu-latest
     permissions:
       contents: write
