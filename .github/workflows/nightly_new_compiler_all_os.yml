@@ -205,18 +205,18 @@ jobs:
           path: roc-src/zig-out/bin/playground.wasm
           retention-days: 4
 
-      - name: Build roc compiler wasm
+      - name: Build roc compiler wasm archive
         uses: ./roc-src/.github/actions/flaky-retry
         with:
-          command: 'cd roc-src && zig build build-echo-wasm -Doptimize=ReleaseSmall'
+          command: 'cd roc-src && zig build build-echo-wasm-archive -Doptimize=ReleaseSmall'
           error_string_contains: 'EndOfStream|build.zig.zon'
           retry_count: 3
 
-      - name: Upload roc_compiler.wasm
+      - name: Upload echo.wasm.zst
         uses: actions/upload-artifact@v4
         with:
-          name: roc_compiler.wasm
-          path: roc-src/zig-out/lib/echo.wasm
+          name: echo.wasm.zst
+          path: roc-src/zig-out/lib/echo.wasm.zst
           retention-days: 4
 
   publish-release:
