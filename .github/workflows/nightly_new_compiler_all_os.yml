@@ -127,6 +127,39 @@ jobs:
           error_string_contains: 'EndOfStream|build.zig.zon'
           retry_count: 3
 
+      - name: check if statically linked (ubuntu)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          file ./roc-src/zig-out/bin/roc | grep "statically linked"
+
+      - name: check if statically linked (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          otool_out="$(otool -L ./roc-src/zig-out/bin/roc)"
+          echo "$otool_out"
+          # Roc must only depend on libraries that ship with every macOS install, so it
+          # stays trivial to install. FSEvents-based file watching links CoreFoundation
+          # and CoreServices (which pull in libobjc); all of these are part of the OS.
+          unexpected="$(echo "$otool_out" | tail -n +2 | grep -vE '^[[:space:]]+(/usr/lib/libSystem\.B\.dylib|/usr/lib/libobjc\.A\.dylib|/System/Library/Frameworks/CoreFoundation\.framework/|/System/Library/Frameworks/CoreServices\.framework/)' || true)"
+          if [ -n "$unexpected" ]; then
+            echo "Looks like the nightly build has a new dynamic dependency, we want Roc to be super easy to install, so it should only depend on libraries that ship with macOS."
+            echo "Unexpected dependencies:"
+            echo "$unexpected"
+            exit 1
+          fi
+
+      - name: check if statically linked (Windows)
+        if: startsWith(matrix.os, 'windows')
+        shell: powershell
+        run: |
+          $imports = (Get-Command roc-src\zig-out\bin\roc.exe).FileVersionInfo.ImportCharacterSet
+          if ($imports) {
+              echo "Looks like the nightly executable has dynamic dependencies. We want Roc to be super easy to install, so it should be statically linked."
+              echo "Dynamic dependencies found:"
+              $imports | ForEach-Object { echo "  $_" }
+              exit 1
+          }
+
       - name: build file name
         run: echo "RELEASE_FOLDER_NAME=roc_nightly-${{ matrix.artifact_name }}-$DATE-$SHA" >> $GITHUB_ENV
 
