@@ -3,6 +3,6 @@ app [main!] { pf: platform "https://github.com/lukewilliamboswell/roc-platform-t
 import pf.Stdout
 
 main! = |_args| {
-    Stdout.line!("Hello, World!")
+    Stdout.line!("Hello, World!")?
     Ok({})
 }
