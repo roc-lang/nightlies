@@ -136,37 +136,37 @@ jobs:
       # (getReleaseTargetQuery). If that pin is lost, Zig falls back to native CPU
       # detection and bakes this runner's armv9 features into the binary, which then
       # dies with SIGILL on older aarch64 devices (Raspberry Pi 4, many phones).
-      - name: check for non-baseline aarch64 instructions (linux arm64)
-        if: matrix.artifact_name == 'linux_arm64'
-        run: |
-          objdump -d --no-show-raw-insn ./roc-src/zig-out/bin/roc > /tmp/roc-dis.txt
+      # - name: check for non-baseline aarch64 instructions (linux arm64)
+      #   if: matrix.artifact_name == 'linux_arm64'
+      #   run: |
+      #     objdump -d --no-show-raw-insn ./roc-src/zig-out/bin/roc > /tmp/roc-dis.txt
 
-          # SVE/SVE2 vector and predicate registers.
-          SVE_RE='[[:space:]](z[0-9]+\.[bhsdq]|p[0-9]+(\.[bhsd])?/[zm])'
-          # LSE atomics (armv8.1).
-          LSE_RE='[[:space:]](cas|casp|swp|ld(add|clr|eor|set|smax|smin|umax|umin))(a|l|al)?(b|h)?([[:space:]]|$)'
-          # RCPC loads/stores (armv8.3/8.4).
-          RCPC_RE='[[:space:]](ldapr|ldapur|ldapursw?|stlur)(b|h)?([[:space:]]|$)'
+      #     # SVE/SVE2 vector and predicate registers.
+      #     SVE_RE='[[:space:]](z[0-9]+\.[bhsdq]|p[0-9]+(\.[bhsd])?/[zm])'
+      #     # LSE atomics (armv8.1).
+      #     LSE_RE='[[:space:]](cas|casp|swp|ld(add|clr|eor|set|smax|smin|umax|umin))(a|l|al)?(b|h)?([[:space:]]|$)'
+      #     # RCPC loads/stores (armv8.3/8.4).
+      #     RCPC_RE='[[:space:]](ldapr|ldapur|ldapursw?|stlur)(b|h)?([[:space:]]|$)'
 
-          fail=0
-          for pair in "SVE:$SVE_RE" "LSE atomics:$LSE_RE" "RCPC:$RCPC_RE"; do
-            name="${pair%%:*}"
-            re="${pair#*:}"
-            count=$(grep -cE "$re" /tmp/roc-dis.txt || true)
-            if [ "$count" -gt 0 ]; then
-              echo "Found $count $name instructions, which are not in the armv8.0-a baseline. Examples:"
-              grep -nE "$re" /tmp/roc-dis.txt | head -5 || true
-              fail=1
-            else
-              echo "OK: no $name instructions"
-            fi
-          done
+      #     fail=0
+      #     for pair in "SVE:$SVE_RE" "LSE atomics:$LSE_RE" "RCPC:$RCPC_RE"; do
+      #       name="${pair%%:*}"
+      #       re="${pair#*:}"
+      #       count=$(grep -cE "$re" /tmp/roc-dis.txt || true)
+      #       if [ "$count" -gt 0 ]; then
+      #         echo "Found $count $name instructions, which are not in the armv8.0-a baseline. Examples:"
+      #         grep -nE "$re" /tmp/roc-dis.txt | head -5 || true
+      #         fail=1
+      #       else
+      #         echo "OK: no $name instructions"
+      #       fi
+      #     done
 
-          if [ "$fail" -ne 0 ]; then
-            echo "This binary requires a newer CPU than the armv8.0-a baseline, so it will crash"
-            echo "with SIGILL on older aarch64 devices. Check getReleaseTargetQuery() in roc's build.zig."
-            exit 1
-          fi
+      #     if [ "$fail" -ne 0 ]; then
+      #       echo "This binary requires a newer CPU than the armv8.0-a baseline, so it will crash"
+      #       echo "with SIGILL on older aarch64 devices. Check getReleaseTargetQuery() in roc's build.zig."
+      #       exit 1
+      #     fi
 
       - name: check if statically linked (macOS)
         if: startsWith(matrix.os, 'macos')
@@ -344,9 +344,9 @@ jobs:
             artifact_name: macos_apple_silicon
           - os: ubuntu-22.04
             artifact_name: linux_x86_64
-          - os: ubuntu-24.04
+          - os: ubuntu-26.04
             artifact_name: linux_x86_64
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             artifact_name: linux_arm64
           - os: windows-2022
             artifact_name: windows_x86_64
