@@ -15,23 +15,119 @@ jobs:
   resolve-roc-ref:
     name: Resolve roc commit and date
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
-      sha: ${{ steps.ref.outputs.sha }}
-      sha_full: ${{ steps.ref.outputs.sha_full }}
+      sha: ${{ steps.green.outputs.sha }}
+      sha_full: ${{ steps.green.outputs.sha_full }}
+      already_released: ${{ steps.green.outputs.already_released }}
       date: ${{ steps.ref.outputs.date }}
       tag_name_components: ${{ steps.ref.outputs.tag_name_components }}
 
     steps:
-      - name: Checkout roc-lang/roc
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
-        with:
-          repository: roc-lang/roc
+      # Don't build from main's tip: a bypass merge can land a PR whose CI was
+      # red, and main is then broken until someone notices. roc's main ruleset
+      # requires exactly one status check, `finish` (the aggregate job of roc's
+      # ci_manager.yml), so "CI passed" for a commit means `finish` was green on
+      # the head of the PR that produced it. Walk main backwards and take the
+      # newest merge commit that landed that way.
+      #
+      # This does not catch every broken main: roc's ruleset sets
+      # strict_required_status_checks_policy=false, so a PR can be green against
+      # a stale base and still break main once merged. Catching that needs
+      # roc's own Nightly Gate (nightly_gate.yml), which runs the full suite on
+      # main and fast-forwards refs/heads/nightly on success. Switch the
+      # resolution below to that branch once it starts passing.
+      - name: Resolve newest green roc-lang/roc commit
+        id: green
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ROC_REPO: roc-lang/roc
+          # Two API calls per candidate; the walk is normally 1-3 candidates.
+          MAX_COMMITS: 50
+        run: |
+          set -euo pipefail
 
-      - name: Resolve ref and date
+          # GitHub Actions' app id, matching the integration_id that roc's
+          # ruleset pins `finish` to, so an unrelated check of the same name
+          # from another app cannot stand in for it.
+          ACTIONS_APP_ID=15368
+
+          picked=""
+          skipped=0
+          checked=0
+          page=1
+          while [ -z "$picked" ] && [ "$checked" -lt "$MAX_COMMITS" ]; do
+            commits=$(gh api "repos/$ROC_REPO/commits?sha=main&per_page=50&page=$page" --jq '.[].sha')
+            [ -n "$commits" ] || break
+
+            # Unquoted on purpose: shas are hex, so word splitting is the split.
+            for sha in $commits; do
+              checked=$((checked + 1))
+              [ "$checked" -le "$MAX_COMMITS" ] || break
+
+              # Commits that reached main inside a merge were never main's tip
+              # on their own, so only merge commits are release candidates.
+              head_sha=$(gh api "repos/$ROC_REPO/commits/$sha/pulls" \
+                --jq "[.[] | select(.merged_at != null and .merge_commit_sha == \"$sha\")][0].head.sha // empty")
+              if [ -z "$head_sha" ]; then
+                echo "skip ${sha:0:7}: not the merge commit of a merged PR"
+                continue
+              fi
+
+              verdict=$(gh api "repos/$ROC_REPO/commits/$head_sha/check-runs?check_name=finish&per_page=100" \
+                --jq "[.check_runs[] | select(.status == \"completed\" and .app.id == $ACTIONS_APP_ID)][0].conclusion // \"missing\"")
+              if [ "$verdict" = "success" ]; then
+                echo "pick ${sha:0:7}: finish=success on PR head ${head_sha:0:7}"
+                picked="$sha"
+                break
+              fi
+
+              skipped=$((skipped + 1))
+              echo "skip ${sha:0:7}: finish=$verdict on PR head ${head_sha:0:7}"
+            done
+
+            page=$((page + 1))
+          done
+
+          if [ -z "$picked" ]; then
+            echo "::error::No roc-lang/roc main commit in the last $MAX_COMMITS commits landed with a green 'finish' check. Refusing to publish a nightly from a main that has no known-good commit."
+            exit 1
+          fi
+
+          if [ "$skipped" -gt 0 ]; then
+            echo "::warning::Skipped $skipped roc-lang/roc main commit(s) that landed with a red or missing 'finish' check. Building ${picked:0:7} instead of main's tip."
+          fi
+
+          short="${picked:0:7}"
+
+          # The tag carries the date, so a repeat of the same commit collides
+          # with nothing and would publish silently. That is the common case
+          # rather than the rare one: while main sits red the walk above keeps
+          # returning the same green commit every day, and the cost is a full
+          # 5-OS build plus a 9-OS test matrix for bits we already shipped.
+          # Release tags are `nightly-<year>-<month>-<day>-<short sha>`, so the
+          # sha suffix is what identifies a rebuild of the same commit.
+          already=""
+          for tag in $(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name'); do
+            case "$tag" in
+              *-"$short") already="$tag"; break ;;
+            esac
+          done
+
+          if [ -n "$already" ]; then
+            echo "::notice::roc-lang/roc $short was already published as $already, and nothing newer has landed green on main. Skipping this nightly."
+            echo "already_released=true" >> $GITHUB_OUTPUT
+          else
+            echo "already_released=false" >> $GITHUB_OUTPUT
+          fi
+
+          echo "sha=$short" >> $GITHUB_OUTPUT
+          echo "sha_full=$picked" >> $GITHUB_OUTPUT
+
+      - name: Resolve date
         id: ref
         run: |
-          echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          echo "sha_full=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
           DATE=$(date "+%Y-%m-%d")
           echo "date=$DATE" >> $GITHUB_OUTPUT
           YEAR=$(echo $DATE | cut -d- -f1)
@@ -56,6 +152,10 @@ jobs:
   build-and-package:
     name: build and package nightly release
     needs: resolve-roc-ref
+    # PR runs exist to exercise the build, so they build regardless; only the
+    # publishing paths skip. Skipping here cascades: publish-release and
+    # test-archives need this job, and neither forces itself to run.
+    if: github.event_name == 'pull_request' || needs.resolve-roc-ref.outputs.already_released != 'true'
     runs-on: ${{ matrix.os }}
     env:
       SHA: ${{ needs.resolve-roc-ref.outputs.sha }}
@@ -245,6 +345,7 @@ jobs:
   build-wasm-artifacts:
     name: build playground and roc compiler wasm
     needs: resolve-roc-ref
+    if: github.event_name == 'pull_request' || needs.resolve-roc-ref.outputs.already_released != 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -313,7 +414,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="nightly-${{ env.TAG_NAME_COMPONENTS }}-${{ env.SHA }}"
-          BODY="Nightly build of new Roc compiler from roc-lang/roc commit [${{ env.SHA }}](https://github.com/roc-lang/roc/commit/${{ env.SHA }}). Note: we still recommend using the [old compiler release](https://github.com/roc-lang/roc/releases/tag/alpha4-rolling) for now."
+          BODY="Nightly build of new Roc compiler from roc-lang/roc commit [${{ env.SHA }}](https://github.com/roc-lang/roc/commit/${{ env.SHA }}), the most recent commit on main that landed with a passing CI run."
 
           # Create the release (non-draft, non-prerelease)
           gh release create "$TAG" artifacts/**/* \
