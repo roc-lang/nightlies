@@ -22,7 +22,7 @@ jobs:
       sha_full: ${{ steps.green.outputs.sha_full }}
       already_released: ${{ steps.green.outputs.already_released }}
       date: ${{ steps.ref.outputs.date }}
-      tag_name_components: ${{ steps.ref.outputs.tag_name_components }}
+      tag: ${{ steps.ref.outputs.tag }}
 
     steps:
       # Don't build from main's tip: a bypass merge can land a PR whose CI was
@@ -127,6 +127,8 @@ jobs:
 
       - name: Resolve date
         id: ref
+        env:
+          SHA: ${{ steps.green.outputs.sha }}
         run: |
           DATE=$(date "+%Y-%m-%d")
           echo "date=$DATE" >> $GITHUB_OUTPUT
@@ -147,7 +149,10 @@ jobs:
             11) MONTH="November" ;;
             12) MONTH="December" ;;
           esac
-          echo "tag_name_components=$YEAR-$MONTH-$DAY" >> $GITHUB_OUTPUT
+          # The single source of truth for this nightly's identity: it names the
+          # release, and is baked into the binary via roc's -Dcompiler-version so
+          # `roc version` reports the release the user actually downloaded.
+          echo "tag=nightly-$YEAR-$MONTH-$DAY-$SHA" >> $GITHUB_OUTPUT
 
   build-and-package:
     name: build and package nightly release
@@ -160,7 +165,6 @@ jobs:
     env:
       SHA: ${{ needs.resolve-roc-ref.outputs.sha }}
       DATE: ${{ needs.resolve-roc-ref.outputs.date }}
-      TAG_NAME_COMPONENTS: ${{ needs.resolve-roc-ref.outputs.tag_name_components }}
     strategy:
       fail-fast: false
       matrix:
@@ -220,10 +224,13 @@ jobs:
         if: runner.os == 'Linux'
         run: lscpu | grep "Model name"
 
+      # -Dcompiler-version is interpolated here rather than read from $TAG at run
+      # time: the command runs inside a composite action, so it must not depend on
+      # this job's env reaching the action's own steps.
       - name: build release
         uses: ./roc-src/.github/actions/flaky-retry
         with:
-          command: 'cd roc-src && zig build build-release'
+          command: 'cd roc-src && zig build build-release -Dcompiler-version=${{ needs.resolve-roc-ref.outputs.tag }}'
           error_string_contains: 'EndOfStream|build.zig.zon'
           retry_count: 3
 
@@ -364,7 +371,7 @@ jobs:
       - name: Build playground
         uses: ./roc-src/.github/actions/flaky-retry
         with:
-          command: 'cd roc-src && zig build build-playground -Doptimize=ReleaseSmall'
+          command: 'cd roc-src && zig build build-playground -Doptimize=ReleaseSmall -Dcompiler-version=${{ needs.resolve-roc-ref.outputs.tag }}'
           error_string_contains: 'EndOfStream|build.zig.zon'
           retry_count: 3
 
@@ -378,7 +385,7 @@ jobs:
       - name: Build roc compiler wasm archive
         uses: ./roc-src/.github/actions/flaky-retry
         with:
-          command: 'cd roc-src && zig build build-echo-wasm-archive -Doptimize=ReleaseSmall'
+          command: 'cd roc-src && zig build build-echo-wasm-archive -Doptimize=ReleaseSmall -Dcompiler-version=${{ needs.resolve-roc-ref.outputs.tag }}'
           error_string_contains: 'EndOfStream|build.zig.zon'
           retry_count: 3
 
@@ -398,7 +405,7 @@ jobs:
       contents: write
     env:
       SHA: ${{ needs.resolve-roc-ref.outputs.sha }}
-      TAG_NAME_COMPONENTS: ${{ needs.resolve-roc-ref.outputs.tag_name_components }}
+      TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
 
     steps:
       - name: Checkout nightlies repo
@@ -413,7 +420,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="nightly-${{ env.TAG_NAME_COMPONENTS }}-${{ env.SHA }}"
           BODY="Nightly build of new Roc compiler from roc-lang/roc commit [${{ env.SHA }}](https://github.com/roc-lang/roc/commit/${{ env.SHA }}), the most recent commit on main that landed with a passing CI run."
 
           # Create the release (non-draft, non-prerelease)
@@ -430,7 +436,7 @@ jobs:
     env:
       SHA: ${{ needs.resolve-roc-ref.outputs.sha }}
       DATE: ${{ needs.resolve-roc-ref.outputs.date }}
-      TAG_NAME_COMPONENTS: ${{ needs.resolve-roc-ref.outputs.tag_name_components }}
+      TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -473,7 +479,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L -H "Authorization: token $GITHUB_TOKEN" -o "${{ env.RELEASE_FOLDER_NAME }}.tar.gz" \
-            "https://github.com/${{ github.repository }}/releases/download/nightly-${{ env.TAG_NAME_COMPONENTS }}-${{ env.SHA }}/${{ env.RELEASE_FOLDER_NAME }}.tar.gz"
+            "https://github.com/${{ github.repository }}/releases/download/$TAG/${{ env.RELEASE_FOLDER_NAME }}.tar.gz"
 
       - name: Download release archive (Windows)
         if: runner.os == 'Windows'
@@ -481,7 +487,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L -H "Authorization: token $GITHUB_TOKEN" -o "${{ env.RELEASE_FOLDER_NAME }}.zip" \
-            "https://github.com/${{ github.repository }}/releases/download/nightly-${{ env.TAG_NAME_COMPONENTS }}-${{ env.SHA }}/${{ env.RELEASE_FOLDER_NAME }}.zip"
+            "https://github.com/${{ github.repository }}/releases/download/$TAG/${{ env.RELEASE_FOLDER_NAME }}.zip"
 
       - name: Print CPU model (Windows)
         if: runner.os == 'Windows'
@@ -510,6 +516,19 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
         with:
           path: nightlies-repo
+
+      # The version is baked in by -Dcompiler-version at build time, so nothing
+      # downstream can notice if that flag stops being passed and the binaries
+      # silently go back to reporting "release-fast-<sha>". This is that check.
+      - name: Check reported version matches the release tag
+        run: |
+          version_out="$(./${{ env.RELEASE_FOLDER_NAME }}/roc version)"
+          echo "$version_out"
+          expected="Roc compiler version $TAG"
+          if [ "$version_out" != "$expected" ]; then
+            echo "Expected '$expected' but got '$version_out'."
+            exit 1
+          fi
 
       - name: Run hello_world_test.roc (Unix)
         if: runner.os != 'Windows'
