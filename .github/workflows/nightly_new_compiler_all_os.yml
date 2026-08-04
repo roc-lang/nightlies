@@ -194,6 +194,11 @@ jobs:
           ref: ${{ needs.resolve-roc-ref.outputs.sha_full }}
           path: roc-src
 
+      - name: Checkout nightlies repo for hello_world_test.roc
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
+        with:
+          path: nightlies-repo
+
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # ratchet:mlugg/setup-zig@v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
@@ -303,6 +308,21 @@ jobs:
               exit 1
           }
 
+      # Fail fast on a compiler that can't actually run a Roc program, before
+      # spending time packaging and publishing it. Pins hello_world_test.roc's
+      # roc: field to this nightly's tag so the smoke test exercises the exact
+      # version string that will ship, and every matrix leg's binary has to
+      # pass this before publish-release (which needs this job) can run.
+      - name: Pin hello_world_test.roc to this nightly and run it
+        env:
+          TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
+        run: |
+          FILE=nightlies-repo/hello_world_test.roc
+          PLATFORM_URL=$(grep -oE 'pf:[[:space:]]*platform[[:space:]]*"[^"]*"' "$FILE" | grep -oE '"[^"]*"' | tr -d '"')
+          perl -0777 -pi -e "s|app \[main!\] \{.*?\}|app [main!] {\n\tpf: platform \"$PLATFORM_URL\",\n\troc: \"$TAG\",\n}|s" "$FILE"
+          cat "$FILE"
+          ./roc-src/zig-out/bin/roc "$FILE"
+
       - name: build file name
         run: echo "RELEASE_FOLDER_NAME=roc_nightly-${{ matrix.artifact_name }}-$DATE-$SHA" >> $GITHUB_ENV
 
@@ -396,10 +416,70 @@ jobs:
           path: roc-src/zig-out/lib/echo.wasm.zst
           retention-days: 4
 
+  package-source:
+    name: Package roc source code
+    needs: resolve-roc-ref
+    if: github.event_name == 'pull_request' || needs.resolve-roc-ref.outputs.already_released != 'true'
+    runs-on: ubuntu-latest
+    env:
+      SHA: ${{ needs.resolve-roc-ref.outputs.sha }}
+      DATE: ${{ needs.resolve-roc-ref.outputs.date }}
+
+    steps:
+      # GitHub's own "Source code" assets on a release are the source of *this*
+      # repo at the tag, which is just the workflow, not the compiler that was
+      # built. Ship the roc-lang/roc tree at the exact commit these binaries
+      # came from, so a release stays buildable even if that commit later
+      # disappears from roc-lang/roc (force-push, rewritten history, deleted repo).
+      - name: Checkout roc-lang/roc
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
+        with:
+          repository: roc-lang/roc
+          ref: ${{ needs.resolve-roc-ref.outputs.sha_full }}
+          path: roc-src
+
+      - name: build file name
+        run: echo "SOURCE_FOLDER_NAME=roc_nightly-source-$DATE-$SHA" >> $GITHUB_ENV
+
+      - name: Prepare source folder
+        run: |
+          # .git here is a shallow, unusable-for-history checkout; dropping it
+          # keeps the archive to the source that was actually compiled.
+          rm -rf ./roc-src/.git
+          mv ./roc-src "${{ env.SOURCE_FOLDER_NAME }}"
+          # The folder name only carries the short sha, so record the full
+          # commit the archive was cut from.
+          echo "${{ needs.resolve-roc-ref.outputs.sha_full }}" > "${{ env.SOURCE_FOLDER_NAME }}/NIGHTLY_SOURCE_COMMIT"
+
+      # Both formats, matching what GitHub attaches to a release itself:
+      # tar.gz for unix, zip because Windows extracts it without extra tools.
+      - name: Compress source (tar.gz)
+        run: tar -czf "${{ env.SOURCE_FOLDER_NAME }}.tar.gz" "${{ env.SOURCE_FOLDER_NAME }}"
+
+      - name: Compress source (zip)
+        run: zip -r -q "${{ env.SOURCE_FOLDER_NAME }}.zip" "${{ env.SOURCE_FOLDER_NAME }}"
+
+      - name: Calculate archive hashes for security purposes
+        run: sha256sum "${{ env.SOURCE_FOLDER_NAME }}.tar.gz" "${{ env.SOURCE_FOLDER_NAME }}.zip"
+
+      - name: Upload roc source archive (tar.gz)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SOURCE_FOLDER_NAME }}.tar.gz
+          path: ${{ env.SOURCE_FOLDER_NAME }}.tar.gz
+          retention-days: 4
+
+      - name: Upload roc source archive (zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SOURCE_FOLDER_NAME }}.zip
+          path: ${{ env.SOURCE_FOLDER_NAME }}.zip
+          retention-days: 4
+
   publish-release:
     name: Publish release to GitHub
     if: github.event_name != 'pull_request'
-    needs: [resolve-roc-ref, build-and-package, build-wasm-artifacts]
+    needs: [resolve-roc-ref, build-and-package, build-wasm-artifacts, package-source]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -420,13 +500,38 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BODY="Nightly build of new Roc compiler from roc-lang/roc commit [${{ env.SHA }}](https://github.com/roc-lang/roc/commit/${{ env.SHA }}), the most recent commit on main that landed with a passing CI run."
+          BODY="Nightly build of new Roc compiler from roc-lang/roc commit [${{ env.SHA }}](https://github.com/roc-lang/roc/commit/${{ env.SHA }}), the most recent commit on main that landed with a passing CI run.
+
+          The \`roc_nightly-source-*\` archives contain the roc-lang/roc source these binaries were built from. GitHub's own \"Source code\" assets below are just this workflow repo."
 
           # Create the release (non-draft, non-prerelease)
           gh release create "$TAG" artifacts/**/* \
             --title "$TAG" \
             --notes "$BODY" \
             --latest=true
+
+      # Keep the repo's copy in sync with the tag that just shipped, so the
+      # next run's smoke test (and anyone reading the repo) sees the version
+      # actually verified to work. Only reachable once gh release create above
+      # succeeded, so a failed release never gets a stale pin committed.
+      - name: Update hello_world_test.roc to this nightly's version
+        run: |
+          FILE=hello_world_test.roc
+          PLATFORM_URL=$(grep -oE 'pf:[[:space:]]*platform[[:space:]]*"[^"]*"' "$FILE" | grep -oE '"[^"]*"' | tr -d '"')
+          perl -0777 -pi -e "s|app \[main!\] \{.*?\}|app [main!] {\n\tpf: platform \"$PLATFORM_URL\",\n\troc: \"$TAG\",\n}|s" "$FILE"
+          cat "$FILE"
+
+      - name: Commit updated hello_world_test.roc
+        run: |
+          if git diff --quiet -- hello_world_test.roc; then
+            echo "hello_world_test.roc already pinned to $TAG"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add hello_world_test.roc
+          git commit -m "Pin hello_world_test.roc to $TAG"
+          git push origin HEAD:${{ github.ref_name }}
 
   test-archives:
     name: Test nightly release archives
