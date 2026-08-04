@@ -194,6 +194,11 @@ jobs:
           ref: ${{ needs.resolve-roc-ref.outputs.sha_full }}
           path: roc-src
 
+      - name: Checkout nightlies repo for hello_world_test.roc
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
+        with:
+          path: nightlies-repo
+
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # ratchet:mlugg/setup-zig@v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
@@ -302,6 +307,21 @@ jobs:
               $imports | ForEach-Object { echo "  $_" }
               exit 1
           }
+
+      # Fail fast on a compiler that can't actually run a Roc program, before
+      # spending time packaging and publishing it. Pins hello_world_test.roc's
+      # roc: field to this nightly's tag so the smoke test exercises the exact
+      # version string that will ship, and every matrix leg's binary has to
+      # pass this before publish-release (which needs this job) can run.
+      - name: Pin hello_world_test.roc to this nightly and run it
+        env:
+          TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
+        run: |
+          FILE=nightlies-repo/hello_world_test.roc
+          PLATFORM_URL=$(grep -oE 'pf:[[:space:]]*platform[[:space:]]*"[^"]*"' "$FILE" | grep -oE '"[^"]*"' | tr -d '"')
+          perl -0777 -pi -e "s|app \[main!\] \{.*?\}|app [main!] {\n\tpf: platform \"$PLATFORM_URL\",\n\troc: \"$TAG\",\n}|s" "$FILE"
+          cat "$FILE"
+          ./roc-src/zig-out/bin/roc "$FILE"
 
       - name: build file name
         run: echo "RELEASE_FOLDER_NAME=roc_nightly-${{ matrix.artifact_name }}-$DATE-$SHA" >> $GITHUB_ENV
@@ -489,6 +509,29 @@ jobs:
             --title "$TAG" \
             --notes "$BODY" \
             --latest=true
+
+      # Keep the repo's copy in sync with the tag that just shipped, so the
+      # next run's smoke test (and anyone reading the repo) sees the version
+      # actually verified to work. Only reachable once gh release create above
+      # succeeded, so a failed release never gets a stale pin committed.
+      - name: Update hello_world_test.roc to this nightly's version
+        run: |
+          FILE=hello_world_test.roc
+          PLATFORM_URL=$(grep -oE 'pf:[[:space:]]*platform[[:space:]]*"[^"]*"' "$FILE" | grep -oE '"[^"]*"' | tr -d '"')
+          perl -0777 -pi -e "s|app \[main!\] \{.*?\}|app [main!] {\n\tpf: platform \"$PLATFORM_URL\",\n\troc: \"$TAG\",\n}|s" "$FILE"
+          cat "$FILE"
+
+      - name: Commit updated hello_world_test.roc
+        run: |
+          if git diff --quiet -- hello_world_test.roc; then
+            echo "hello_world_test.roc already pinned to $TAG"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add hello_world_test.roc
+          git commit -m "Pin hello_world_test.roc to $TAG"
+          git push origin HEAD:${{ github.ref_name }}
 
   test-archives:
     name: Test nightly release archives
