@@ -106,7 +106,7 @@ jobs:
           # rather than the rare one: while main sits red the walk above keeps
           # returning the same green commit every day, and the cost is a full
           # 5-OS build plus a 9-OS test matrix for bits we already shipped.
-          # Release tags are `nightly-<year>-<month>-<day>-<short sha>`, so the
+          # Release tags are `nightly-YYYY-MM-DD-<short sha>`, so the
           # sha suffix is what identifies a rebuild of the same commit.
           already=""
           for tag in $(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name'); do
@@ -132,27 +132,10 @@ jobs:
         run: |
           DATE=$(date "+%Y-%m-%d")
           echo "date=$DATE" >> $GITHUB_OUTPUT
-          YEAR=$(echo $DATE | cut -d- -f1)
-          MONTH_NUM=$(echo $DATE | cut -d- -f2)
-          DAY=$(echo $DATE | cut -d- -f3)
-          case $MONTH_NUM in
-            01) MONTH="January" ;;
-            02) MONTH="February" ;;
-            03) MONTH="March" ;;
-            04) MONTH="April" ;;
-            05) MONTH="May" ;;
-            06) MONTH="June" ;;
-            07) MONTH="July" ;;
-            08) MONTH="August" ;;
-            09) MONTH="September" ;;
-            10) MONTH="October" ;;
-            11) MONTH="November" ;;
-            12) MONTH="December" ;;
-          esac
           # The single source of truth for this nightly's identity: it names the
           # release, and is baked into the binary via roc's -Dcompiler-version so
           # `roc version` reports the release the user actually downloaded.
-          echo "tag=nightly-$YEAR-$MONTH-$DAY-$SHA" >> $GITHUB_OUTPUT
+          echo "tag=nightly-$DATE-$SHA" >> $GITHUB_OUTPUT
 
   build-and-package:
     name: build and package nightly release
