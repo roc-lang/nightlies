@@ -483,6 +483,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # For the pin PR below. contents: write covers creating its branch and
+      # the release; opening and closing the PR itself needs this.
+      pull-requests: write
     env:
       SHA: ${{ needs.resolve-roc-ref.outputs.sha }}
       TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
@@ -513,25 +516,92 @@ jobs:
       # Keep the repo's copy in sync with the tag that just shipped, so the
       # next run's smoke test (and anyone reading the repo) sees the version
       # actually verified to work. Only reachable once gh release create above
-      # succeeded, so a failed release never gets a stale pin committed.
-      - name: Update hello_world_test.roc to this nightly's version
+      # succeeded, so a failed release never gets a stale pin proposed.
+      #
+      # This cannot be a plain `git push` to main: main's ruleset requires
+      # changes to arrive through a pull request *and* every commit to carry a
+      # verified signature, and a push from the runner satisfies neither. So
+      # the commit is made on a side branch through GraphQL
+      # createCommitOnBranch, which GitHub signs with its own key, and a PR
+      # proposes it.
+      - name: Open a PR pinning hello_world_test.roc to this nightly
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_BRANCH: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
+
           FILE=hello_world_test.roc
           PLATFORM_URL=$(grep -oE 'pf:[[:space:]]*platform[[:space:]]*"[^"]*"' "$FILE" | grep -oE '"[^"]*"' | tr -d '"')
           perl -0777 -pi -e "s|app \[main!\] \{.*?\}|app [main!] {\n\tpf: platform \"$PLATFORM_URL\",\n\troc: \"$TAG\",\n}|s" "$FILE"
           cat "$FILE"
 
-      - name: Commit updated hello_world_test.roc
-        run: |
-          if git diff --quiet -- hello_world_test.roc; then
-            echo "hello_world_test.roc already pinned to $TAG"
+          if git diff --quiet -- "$FILE"; then
+            echo "$FILE is already pinned to $TAG"
             exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add hello_world_test.roc
-          git commit -m "Pin hello_world_test.roc to $TAG"
-          git push origin HEAD:${{ github.ref_name }}
+
+          # One branch per tag, so a rerun of the same nightly reuses its
+          # branch instead of piling up near-identical ones.
+          PR_BRANCH="pin-hello-world-test/$TAG"
+
+          # Yesterday's PR is obsolete the moment this one exists: both edit
+          # the same two lines, and only the newest pin is worth merging.
+          # Closing them keeps the queue at one open PR.
+          for old in $(gh pr list --state open --json number,headRefName \
+                --jq ".[] | select(.headRefName | startswith(\"pin-hello-world-test/\") and . != \"$PR_BRANCH\") | .number"); do
+            echo "Closing superseded pin PR #$old"
+            gh pr close "$old" --delete-branch --comment "Superseded by the pin for $TAG." || true
+          done
+
+          # Branch off main's current tip rather than this run's checkout, so
+          # the PR stays mergeable if main moved while the build ran.
+          BASE_OID=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$BASE_BRANCH" --jq .object.sha)
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$PR_BRANCH" >/dev/null 2>&1; then
+            HEAD_OID=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$PR_BRANCH" --jq .object.sha)
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/heads/$PR_BRANCH" -f sha="$BASE_OID" >/dev/null
+            HEAD_OID="$BASE_OID"
+          fi
+
+          # createCommitOnBranch takes whole-file contents, base64 encoded, so
+          # there is no merge to do and no signature for us to produce: GitHub
+          # writes and signs the commit itself.
+          jq -n \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg branch "$PR_BRANCH" \
+            --arg oid "$HEAD_OID" \
+            --arg msg "Pin hello_world_test.roc to $TAG" \
+            --arg path "$FILE" \
+            --arg contents "$(base64 -w0 "$FILE")" \
+            '{
+              query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid url } } }",
+              variables: {input: {
+                branch: {repositoryNameWithOwner: $repo, branchName: $branch},
+                message: {headline: $msg},
+                expectedHeadOid: $oid,
+                fileChanges: {additions: [{path: $path, contents: $contents}]}
+              }}
+            }' > commit-payload.json
+          gh api graphql --input commit-payload.json
+
+          if [ -n "$(gh pr list --state open --head "$PR_BRANCH" --json number --jq '.[].number')" ]; then
+            echo "PR for $PR_BRANCH already open"
+            exit 0
+          fi
+
+          gh pr create \
+            --base "$BASE_BRANCH" \
+            --head "$PR_BRANCH" \
+            --title "Pin hello_world_test.roc to $TAG" \
+            --body "Automated: [\`$TAG\`](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG) was published and its smoke test passed on every OS, so this pins \`hello_world_test.roc\` to it."
+
+          # Best effort: auto-merge only exists if the repo has it enabled, and
+          # the pin is cosmetic enough that failing the release job over it
+          # would be the wrong trade.
+          gh pr merge "$PR_BRANCH" --squash --auto --delete-branch \
+            || echo "::notice::Could not enable auto-merge on the pin PR; merge it by hand."
 
   test-archives:
     name: Test nightly release archives
