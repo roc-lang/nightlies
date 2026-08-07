@@ -691,9 +691,11 @@ jobs:
       - name: Run hello_world_test.roc (Unix)
         if: runner.os != 'Windows'
         run: |
+          ./${{ env.RELEASE_FOLDER_NAME }}/roc fmt nightlies-repo/hello_world_test.roc
           ./${{ env.RELEASE_FOLDER_NAME }}/roc nightlies-repo/hello_world_test.roc
 
       - name: Run hello_world_test.roc (Windows)
         if: runner.os == 'Windows'
         run: |
+          ./${{ env.RELEASE_FOLDER_NAME }}/roc fmt nightlies-repo/hello_world_test.roc
           ./${{ env.RELEASE_FOLDER_NAME }}/roc nightlies-repo/hello_world_test.roc
