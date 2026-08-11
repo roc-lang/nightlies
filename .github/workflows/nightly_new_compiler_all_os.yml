@@ -385,6 +385,20 @@ jobs:
           path: roc-src/zig-out/bin/playground.wasm
           retention-days: 4
 
+      - name: Build web REPL
+        uses: ./roc-src/.github/actions/flaky-retry
+        with:
+          command: 'cd roc-src && zig build build-repl-wasm -Dcompiler-version=${{ needs.resolve-roc-ref.outputs.tag }}'
+          error_string_contains: 'EndOfStream|build.zig.zon'
+          retry_count: 3
+
+      - name: Upload repl.wasm
+        uses: actions/upload-artifact@v4
+        with:
+          name: repl.wasm
+          path: roc-src/zig-out/lib/repl/repl.wasm
+          retention-days: 4
+
       - name: Build roc compiler wasm archive
         uses: ./roc-src/.github/actions/flaky-retry
         with:
