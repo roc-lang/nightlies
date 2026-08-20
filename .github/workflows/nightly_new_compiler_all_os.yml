@@ -353,7 +353,7 @@ jobs:
           retention-days: 4
 
   build-wasm-artifacts:
-    name: build playground and roc compiler wasm
+    name: build compressed web wasm artifacts
     needs: resolve-roc-ref
     if: github.event_name == 'pull_request' || needs.resolve-roc-ref.outputs.already_released != 'true'
     runs-on: ubuntu-latest
@@ -371,18 +371,32 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
           use-cache: true
 
-      - name: Build playground
+      - name: Build playground wasm archive
         uses: ./roc-src/.github/actions/flaky-retry
         with:
-          command: 'cd roc-src && zig build build-playground -Doptimize=ReleaseSmall -Dcompiler-version=${{ needs.resolve-roc-ref.outputs.tag }}'
+          command: 'cd roc-src && zig build build-playground-wasm-archive -Doptimize=ReleaseSmall -Dcompiler-version=${{ needs.resolve-roc-ref.outputs.tag }}'
           error_string_contains: 'EndOfStream|build.zig.zon'
           retry_count: 3
 
-      - name: Upload playground.wasm
+      - name: Upload playground.wasm.zst
         uses: actions/upload-artifact@v4
         with:
-          name: playground.wasm
-          path: roc-src/zig-out/bin/playground.wasm
+          name: playground.wasm.zst
+          path: roc-src/zig-out/lib/playground/playground.wasm.zst
+          retention-days: 4
+
+      - name: Build REPL wasm archive
+        uses: ./roc-src/.github/actions/flaky-retry
+        with:
+          command: 'cd roc-src && zig build build-repl-wasm-archive -Doptimize=ReleaseSmall -Dcompiler-version=${{ needs.resolve-roc-ref.outputs.tag }}'
+          error_string_contains: 'EndOfStream|build.zig.zon'
+          retry_count: 3
+
+      - name: Upload repl.wasm.zst
+        uses: actions/upload-artifact@v4
+        with:
+          name: repl.wasm.zst
+          path: roc-src/zig-out/lib/repl/repl.wasm.zst
           retention-days: 4
 
       - name: Build roc compiler wasm archive
@@ -396,7 +410,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: echo.wasm.zst
-          path: roc-src/zig-out/lib/echo.wasm.zst
+          path: roc-src/zig-out/lib/echo/echo.wasm.zst
           retention-days: 4
 
   package-source:
