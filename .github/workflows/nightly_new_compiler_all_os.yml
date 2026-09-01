@@ -1,6 +1,11 @@
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Publish even if a nightly was already released today (or this commit was already released). The tag still has to be free: re-releasing the same commit on the same day collides with the existing tag and fails."
+        type: boolean
+        default: false
   schedule:
     - cron: "0 9 * * *"
 
@@ -8,6 +13,15 @@ name: Nightly release for new compiler
 
 # Do not add permissions here! Configure them at the job level!
 permissions: {}
+
+# A manual run and the 9:00 UTC cron can otherwise overlap: the release guard
+# in resolve-roc-ref reads published releases, so a run that starts while
+# another is still building sees no release yet and happily builds a second
+# one. Queueing the newcomer means it resolves after the first has published,
+# and the guard then skips it. PRs get their own group so they stay parallel.
+concurrency:
+  group: nightly-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: false
 
 env:
   ZIG_VERSION: 0.16.0
@@ -21,7 +35,7 @@ jobs:
       sha: ${{ steps.green.outputs.sha }}
       sha_full: ${{ steps.green.outputs.sha_full }}
       already_released: ${{ steps.green.outputs.already_released }}
-      date: ${{ steps.ref.outputs.date }}
+      date: ${{ steps.green.outputs.date }}
       tag: ${{ steps.ref.outputs.tag }}
 
     steps:
@@ -45,6 +59,7 @@ jobs:
           ROC_REPO: roc-lang/roc
           # Two API calls per candidate; the walk is normally 1-3 candidates.
           MAX_COMMITS: 50
+          FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
 
@@ -101,37 +116,72 @@ jobs:
 
           short="${picked:0:7}"
 
-          # The tag carries the date, so a repeat of the same commit collides
-          # with nothing and would publish silently. That is the common case
-          # rather than the rare one: while main sits red the walk above keeps
-          # returning the same green commit every day, and the cost is a full
-          # 5-OS build plus a 9-OS test matrix for bits we already shipped.
-          # Release tags are `nightly-YYYY-MM-DD-<short sha>`, so the
-          # sha suffix is what identifies a rebuild of the same commit.
-          already=""
-          for tag in $(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name'); do
+          # Resolved here rather than in a later step so both halves of the
+          # guard below and the tag itself agree on one date, even across a
+          # midnight boundary. The runner clock is UTC, which is also what the
+          # cron schedule above is in.
+          DATE=$(date -u "+%Y-%m-%d")
+
+          # Two ways an already-published nightly can come round again, both
+          # checked against the existing release tags
+          # (`nightly-YYYY-MM-DD-<short sha>`):
+          #
+          # 1. Same commit, any day. The tag carries the date, so a repeat of
+          #    the same commit collides with nothing and would publish
+          #    silently. That is the common case rather than the rare one:
+          #    while main sits red the walk above keeps returning the same
+          #    green commit every day, and the cost is a full 5-OS build plus a
+          #    9-OS test matrix for bits we already shipped.
+          #
+          # 2. Same day, any commit. A manual workflow_dispatch releases, then
+          #    the cron fires later the same day; if anything green landed in
+          #    between, the sha differs and check 1 lets it through. That is
+          #    two nightlies for one date, which is exactly what "nightly"
+          #    promises not to be.
+          # Fetched into a variable rather than inlined into the `for` below:
+          # a command substitution that fails there is not caught by `set -e`,
+          # so a hiccup listing releases would silently mean zero iterations,
+          # no match, and the duplicate release this guard exists to stop.
+          # As an assignment, a failure aborts the step instead.
+          tags=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name')
+
+          same_sha=""
+          same_day=""
+          for tag in $tags; do
             case "$tag" in
-              *-"$short") already="$tag"; break ;;
+              *-"$short") [ -n "$same_sha" ] || same_sha="$tag" ;;
             esac
+            case "$tag" in
+              nightly-"$DATE"-*) [ -n "$same_day" ] || same_day="$tag" ;;
+            esac
+            [ -n "$same_sha" ] && [ -n "$same_day" ] && break
           done
 
-          if [ -n "$already" ]; then
-            echo "::notice::roc-lang/roc $short was already published as $already, and nothing newer has landed green on main. Skipping this nightly."
-            echo "already_released=true" >> $GITHUB_OUTPUT
-          else
-            echo "already_released=false" >> $GITHUB_OUTPUT
+          already_released=false
+          if [ -n "$same_day" ]; then
+            echo "::notice::$same_day was already released today ($DATE). Skipping this nightly; re-run with the 'force' input if a second release today is really wanted."
+            already_released=true
+          elif [ -n "$same_sha" ]; then
+            echo "::notice::roc-lang/roc $short was already published as $same_sha, and nothing newer has landed green on main. Skipping this nightly."
+            already_released=true
           fi
 
+          if [ "$already_released" = "true" ] && [ "$FORCE" = "true" ]; then
+            echo "::warning::Publishing anyway because the 'force' input was set."
+            already_released=false
+          fi
+
+          echo "already_released=$already_released" >> $GITHUB_OUTPUT
+          echo "date=$DATE" >> $GITHUB_OUTPUT
           echo "sha=$short" >> $GITHUB_OUTPUT
           echo "sha_full=$picked" >> $GITHUB_OUTPUT
 
-      - name: Resolve date
+      - name: Resolve tag
         id: ref
         env:
           SHA: ${{ steps.green.outputs.sha }}
+          DATE: ${{ steps.green.outputs.date }}
         run: |
-          DATE=$(date "+%Y-%m-%d")
-          echo "date=$DATE" >> $GITHUB_OUTPUT
           # The single source of truth for this nightly's identity: it names the
           # release, and is baked into the binary via roc's -Dcompiler-version so
           # `roc version` reports the release the user actually downloaded.
