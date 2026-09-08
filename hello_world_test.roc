@@ -1,6 +1,6 @@
 app [main!] {
 	pf: platform "https://github.com/lukewilliamboswell/roc-platform-template-zig/releases/download/1.0.0/AnZoxzoGPtSGQ15EQh6pBeeaHJ7aizP9MQhK81dES3Uq.tar.zst",
-	roc: "nightly-2026-09-07-14d9829",
+	roc: "nightly-2026-09-08-39a3f89",
 }
 
 import pf.Stdout
