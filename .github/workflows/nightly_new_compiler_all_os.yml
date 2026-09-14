@@ -191,8 +191,8 @@ jobs:
     name: build and package nightly release
     needs: resolve-roc-ref
     # PR runs exist to exercise the build, so they build regardless; only the
-    # publishing paths skip. Skipping here cascades: publish-release and
-    # test-archives need this job, and neither forces itself to run.
+    # publishing paths skip. publish-release repeats this same guard, because
+    # it no longer takes a skipped or failed build here as a reason to skip.
     if: github.event_name == 'pull_request' || needs.resolve-roc-ref.outputs.already_released != 'true'
     runs-on: ${{ matrix.os }}
     env:
@@ -511,9 +511,24 @@ jobs:
 
   publish-release:
     name: Publish release to GitHub
-    if: github.event_name != 'pull_request'
+    # One platform failing to build must not sink the whole nightly: the
+    # archives that did build are still worth shipping, and a missing one is
+    # better than nothing at all for that day. So instead of inheriting the
+    # default "skip if any dependency failed", this job runs as long as the
+    # run was not cancelled and resolve-roc-ref itself produced a tag; the
+    # already_released guard the build jobs use has to be repeated here for
+    # the same reason. Which archives actually exist is decided below, from
+    # what was uploaded. The failed build leg still shows up red, so the run
+    # as a whole is still reported as failed.
+    if: >-
+      ${{ !cancelled()
+        && github.event_name != 'pull_request'
+        && needs.resolve-roc-ref.result == 'success'
+        && needs.resolve-roc-ref.outputs.already_released != 'true' }}
     needs: [resolve-roc-ref, build-and-package, build-wasm-artifacts, package-source]
     runs-on: ubuntu-latest
+    outputs:
+      test_matrix: ${{ steps.built.outputs.test_matrix }}
     permissions:
       contents: write
       # For the pin PR below. contents: write covers creating its branch and
@@ -531,6 +546,56 @@ jobs:
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # ratchet:actions/download-artifact@v5.0.0
         with:
           path: ./artifacts
+
+      # Because this job now runs even when a build leg failed, it has to work
+      # out for itself which platforms made it into ./artifacts, warn about the
+      # ones that did not, and refuse to publish a release with no binaries at
+      # all. The list it produces also drives the smoke-test matrix below, so
+      # those don't try to download an archive that was never released.
+      - name: Determine which archives were built
+        id: built
+        run: |
+          set -euo pipefail
+
+          built=()
+          for platform in macos_x86_64 macos_apple_silicon linux_x86_64 linux_arm64 windows_x86_64; do
+            if compgen -G "artifacts/roc_nightly-$platform-*/*" > /dev/null; then
+              built+=("$platform")
+            else
+              echo "::warning::No archive was built for $platform; it will be missing from $TAG."
+            fi
+          done
+
+          if [ ${#built[@]} -eq 0 ]; then
+            echo "::error::No platform archives were built, refusing to publish a release without binaries."
+            exit 1
+          fi
+          echo "Publishing archives for: ${built[*]}"
+
+          for extra in playground.wasm echo.wasm.zst "roc_nightly-source-*"; do
+            compgen -G "artifacts/$extra/*" > /dev/null \
+              || echo "::warning::$extra is missing from $TAG."
+          done
+
+          # Every OS the smoke tests cover, paired with the archive it needs.
+          # Legs whose archive is missing are dropped rather than left to fail
+          # on a 404 download.
+          #- {os: windows-11-arm, artifact_name: windows_arm64}
+          matrix=$(jq -cn --args '
+            [
+              {os: "macos-15-intel", artifact_name: "macos_x86_64"},
+              {os: "macos-15",       artifact_name: "macos_apple_silicon"},
+              {os: "macos-26-intel", artifact_name: "macos_x86_64"},
+              {os: "macos-26",       artifact_name: "macos_apple_silicon"},
+              {os: "ubuntu-22.04",   artifact_name: "linux_x86_64"},
+              {os: "ubuntu-26.04",   artifact_name: "linux_x86_64"},
+              {os: "ubuntu-26.04-arm", artifact_name: "linux_arm64"},
+              {os: "windows-2022",   artifact_name: "windows_x86_64"},
+              {os: "windows-2025",   artifact_name: "windows_x86_64"}
+            ] | map(select(.artifact_name as $a | $ARGS.positional | index($a)))
+            | {include: .}' "${built[@]}")
+          echo "$matrix"
+          echo "test_matrix=$matrix" >> "$GITHUB_OUTPUT"
 
       - name: Create Release with gh CLI
         env:
@@ -628,7 +693,7 @@ jobs:
             --base "$BASE_BRANCH" \
             --head "$PR_BRANCH" \
             --title "Pin hello_world_test.roc to $TAG" \
-            --body "Automated: [\`$TAG\`](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG) was published and its smoke test passed on every OS, so this pins \`hello_world_test.roc\` to it."
+            --body "Automated: [\`$TAG\`](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG) was published and its smoke test passed on every OS it was built for, so this pins \`hello_world_test.roc\` to it."
 
           # Best effort: auto-merge only exists if the repo has it enabled, and
           # the pin is cosmetic enough that failing the release job over it
@@ -647,28 +712,10 @@ jobs:
       TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: macos-15-intel
-            artifact_name: macos_x86_64
-          - os: macos-15
-            artifact_name: macos_apple_silicon
-          - os: macos-26-intel
-            artifact_name: macos_x86_64
-          - os: macos-26
-            artifact_name: macos_apple_silicon
-          - os: ubuntu-22.04
-            artifact_name: linux_x86_64
-          - os: ubuntu-26.04
-            artifact_name: linux_x86_64
-          - os: ubuntu-26.04-arm
-            artifact_name: linux_arm64
-          - os: windows-2022
-            artifact_name: windows_x86_64
-          - os: windows-2025
-            artifact_name: windows_x86_64
-          #- os: windows-11-arm
-          #  artifact_name: windows_arm64
+      # Built in publish-release, from the archives that actually shipped: a
+      # platform that failed to build has no archive to smoke test, and a leg
+      # for it would only fail on the download.
+      matrix: ${{ fromJSON(needs.publish-release.outputs.test_matrix) }}
 
     defaults:
       run:
