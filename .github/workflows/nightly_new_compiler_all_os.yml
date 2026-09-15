@@ -346,7 +346,7 @@ jobs:
       # roc: field to this nightly's tag so the smoke test exercises the exact
       # version string that will ship, and every matrix leg's binary has to
       # pass this before publish-release (which needs this job) can run.
-      - name: Pin hello_world_test.roc to this nightly and run it
+      - name: Pin hello_world_test.roc to this nightly
         env:
           TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
         run: |
@@ -354,7 +354,34 @@ jobs:
           PLATFORM_URL=$(grep -oE 'pf:[[:space:]]*platform[[:space:]]*"[^"]*"' "$FILE" | grep -oE '"[^"]*"' | tr -d '"')
           perl -0777 -pi -e "s|app \[main!\] \{.*?\}|app [main!] {\n\tpf: platform \"$PLATFORM_URL\",\n\troc: \"$TAG\",\n}|s" "$FILE"
           cat "$FILE"
-          ./roc-src/zig-out/bin/roc "$FILE"
+
+      # Running the test program downloads the platform tarball from GitHub
+      # releases, and that download flakes: 2026-09-15's macos_x86_64 leg died
+      # on "── ✗ download failed ── ... Error: HttpError" and took the whole
+      # nightly with it. The retry matches that signature only; roc's default
+      # pattern is about Zig dependency fetches and does not cover it.
+      #
+      # The action is pinned to roc-lang/roc 1bf9043 ("ci: stop flaky-retry from
+      # matching real failures"), rather than the ./roc-src copy the build step
+      # uses, so a change to that action in roc cannot alter a nightly run.
+      #
+      # Split by OS because flaky-retry runs `command` through bash on Unix and
+      # `cmd /c` on Windows, which need different path spellings.
+      - name: Run hello_world_test.roc (Unix)
+        if: runner.os != 'Windows'
+        uses: roc-lang/roc/.github/actions/flaky-retry@1bf9043142a49a5290f7897af7a7e6f2c70a6615 # ratchet:exclude
+        with:
+          command: './roc-src/zig-out/bin/roc nightlies-repo/hello_world_test.roc'
+          error_string_contains: 'download failed|Error: HttpError'
+          retry_count: 3
+
+      - name: Run hello_world_test.roc (Windows)
+        if: runner.os == 'Windows'
+        uses: roc-lang/roc/.github/actions/flaky-retry@1bf9043142a49a5290f7897af7a7e6f2c70a6615 # ratchet:exclude
+        with:
+          command: 'roc-src\zig-out\bin\roc.exe nightlies-repo\hello_world_test.roc'
+          error_string_contains: 'download failed|Error: HttpError'
+          retry_count: 3
 
       - name: build file name
         run: echo "RELEASE_FOLDER_NAME=roc_nightly-${{ matrix.artifact_name }}-$DATE-$SHA" >> $GITHUB_ENV
