@@ -347,6 +347,8 @@ jobs:
       # version string that will ship, and every matrix leg's binary has to
       # pass this before publish-release (which needs this job) can run.
       - name: Pin hello_world_test.roc to this nightly
+        # TEMP disabled: hello_world_test.roc is headerless for now.
+        if: false
         env:
           TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
         run: |
@@ -747,8 +749,10 @@ jobs:
     # its result is 'success' only when all of them did. The explicit result
     # checks are again there to opt out of a failed build leg's skip
     # propagating this far down the graph.
+    # TEMP disabled: hello_world_test.roc is headerless for now.
     if: >-
-      ${{ !cancelled()
+      ${{ false
+        && !cancelled()
         && github.event_name != 'pull_request'
         && needs.publish-release.result == 'success'
         && needs.test-archives.result == 'success' }}
