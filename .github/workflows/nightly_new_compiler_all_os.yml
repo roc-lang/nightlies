@@ -462,6 +462,7 @@ jobs:
         with:
           name: playground.wasm
           path: roc-src/zig-out/bin/playground.wasm
+          if-no-files-found: error
           retention-days: 4
 
       - name: Build roc compiler wasm archive
@@ -475,7 +476,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: echo.wasm.zst
-          path: roc-src/zig-out/lib/echo.wasm.zst
+          path: roc-src/zig-out/lib/echo/echo.wasm.zst
+          if-no-files-found: error
           retention-days: 4
 
   package-source:
