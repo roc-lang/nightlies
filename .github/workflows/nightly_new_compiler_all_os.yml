@@ -1,6 +1,11 @@
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Publish even if a nightly was already released today (or this commit was already released). The tag still has to be free: re-releasing the same commit on the same day collides with the existing tag and fails."
+        type: boolean
+        default: false
   schedule:
     - cron: "0 9 * * *"
 
@@ -9,8 +14,17 @@ name: Nightly release for new compiler
 # Do not add permissions here! Configure them at the job level!
 permissions: {}
 
+# A manual run and the 9:00 UTC cron can otherwise overlap: the release guard
+# in resolve-roc-ref reads published releases, so a run that starts while
+# another is still building sees no release yet and happily builds a second
+# one. Queueing the newcomer means it resolves after the first has published,
+# and the guard then skips it. PRs get their own group so they stay parallel.
+concurrency:
+  group: nightly-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: false
+
 env:
-  ZIG_VERSION: 0.16.0
+  ZIG_VERSION: 0.17.0
 jobs:
   resolve-roc-ref:
     name: Resolve roc commit and date
@@ -21,7 +35,7 @@ jobs:
       sha: ${{ steps.green.outputs.sha }}
       sha_full: ${{ steps.green.outputs.sha_full }}
       already_released: ${{ steps.green.outputs.already_released }}
-      date: ${{ steps.ref.outputs.date }}
+      date: ${{ steps.green.outputs.date }}
       tag: ${{ steps.ref.outputs.tag }}
 
     steps:
@@ -45,6 +59,7 @@ jobs:
           ROC_REPO: roc-lang/roc
           # Two API calls per candidate; the walk is normally 1-3 candidates.
           MAX_COMMITS: 50
+          FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
 
@@ -101,37 +116,72 @@ jobs:
 
           short="${picked:0:7}"
 
-          # The tag carries the date, so a repeat of the same commit collides
-          # with nothing and would publish silently. That is the common case
-          # rather than the rare one: while main sits red the walk above keeps
-          # returning the same green commit every day, and the cost is a full
-          # 5-OS build plus a 9-OS test matrix for bits we already shipped.
-          # Release tags are `nightly-YYYY-MM-DD-<short sha>`, so the
-          # sha suffix is what identifies a rebuild of the same commit.
-          already=""
-          for tag in $(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name'); do
+          # Resolved here rather than in a later step so both halves of the
+          # guard below and the tag itself agree on one date, even across a
+          # midnight boundary. The runner clock is UTC, which is also what the
+          # cron schedule above is in.
+          DATE=$(date -u "+%Y-%m-%d")
+
+          # Two ways an already-published nightly can come round again, both
+          # checked against the existing release tags
+          # (`nightly-YYYY-MM-DD-<short sha>`):
+          #
+          # 1. Same commit, any day. The tag carries the date, so a repeat of
+          #    the same commit collides with nothing and would publish
+          #    silently. That is the common case rather than the rare one:
+          #    while main sits red the walk above keeps returning the same
+          #    green commit every day, and the cost is a full 5-OS build plus a
+          #    9-OS test matrix for bits we already shipped.
+          #
+          # 2. Same day, any commit. A manual workflow_dispatch releases, then
+          #    the cron fires later the same day; if anything green landed in
+          #    between, the sha differs and check 1 lets it through. That is
+          #    two nightlies for one date, which is exactly what "nightly"
+          #    promises not to be.
+          # Fetched into a variable rather than inlined into the `for` below:
+          # a command substitution that fails there is not caught by `set -e`,
+          # so a hiccup listing releases would silently mean zero iterations,
+          # no match, and the duplicate release this guard exists to stop.
+          # As an assignment, a failure aborts the step instead.
+          tags=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name')
+
+          same_sha=""
+          same_day=""
+          for tag in $tags; do
             case "$tag" in
-              *-"$short") already="$tag"; break ;;
+              *-"$short") [ -n "$same_sha" ] || same_sha="$tag" ;;
             esac
+            case "$tag" in
+              nightly-"$DATE"-*) [ -n "$same_day" ] || same_day="$tag" ;;
+            esac
+            [ -n "$same_sha" ] && [ -n "$same_day" ] && break
           done
 
-          if [ -n "$already" ]; then
-            echo "::notice::roc-lang/roc $short was already published as $already, and nothing newer has landed green on main. Skipping this nightly."
-            echo "already_released=true" >> $GITHUB_OUTPUT
-          else
-            echo "already_released=false" >> $GITHUB_OUTPUT
+          already_released=false
+          if [ -n "$same_day" ]; then
+            echo "::notice::$same_day was already released today ($DATE). Skipping this nightly; re-run with the 'force' input if a second release today is really wanted."
+            already_released=true
+          elif [ -n "$same_sha" ]; then
+            echo "::notice::roc-lang/roc $short was already published as $same_sha, and nothing newer has landed green on main. Skipping this nightly."
+            already_released=true
           fi
 
+          if [ "$already_released" = "true" ] && [ "$FORCE" = "true" ]; then
+            echo "::warning::Publishing anyway because the 'force' input was set."
+            already_released=false
+          fi
+
+          echo "already_released=$already_released" >> $GITHUB_OUTPUT
+          echo "date=$DATE" >> $GITHUB_OUTPUT
           echo "sha=$short" >> $GITHUB_OUTPUT
           echo "sha_full=$picked" >> $GITHUB_OUTPUT
 
-      - name: Resolve date
+      - name: Resolve tag
         id: ref
         env:
           SHA: ${{ steps.green.outputs.sha }}
+          DATE: ${{ steps.green.outputs.date }}
         run: |
-          DATE=$(date "+%Y-%m-%d")
-          echo "date=$DATE" >> $GITHUB_OUTPUT
           # The single source of truth for this nightly's identity: it names the
           # release, and is baked into the binary via roc's -Dcompiler-version so
           # `roc version` reports the release the user actually downloaded.
@@ -141,8 +191,8 @@ jobs:
     name: build and package nightly release
     needs: resolve-roc-ref
     # PR runs exist to exercise the build, so they build regardless; only the
-    # publishing paths skip. Skipping here cascades: publish-release and
-    # test-archives need this job, and neither forces itself to run.
+    # publishing paths skip. publish-release repeats this same guard, because
+    # it no longer takes a skipped or failed build here as a reason to skip.
     if: github.event_name == 'pull_request' || needs.resolve-roc-ref.outputs.already_released != 'true'
     runs-on: ${{ matrix.os }}
     env:
@@ -296,7 +346,9 @@ jobs:
       # roc: field to this nightly's tag so the smoke test exercises the exact
       # version string that will ship, and every matrix leg's binary has to
       # pass this before publish-release (which needs this job) can run.
-      - name: Pin hello_world_test.roc to this nightly and run it
+      - name: Pin hello_world_test.roc to this nightly
+        # TEMP disabled: hello_world_test.roc is headerless for now.
+        if: false
         env:
           TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
         run: |
@@ -304,7 +356,34 @@ jobs:
           PLATFORM_URL=$(grep -oE 'pf:[[:space:]]*platform[[:space:]]*"[^"]*"' "$FILE" | grep -oE '"[^"]*"' | tr -d '"')
           perl -0777 -pi -e "s|app \[main!\] \{.*?\}|app [main!] {\n\tpf: platform \"$PLATFORM_URL\",\n\troc: \"$TAG\",\n}|s" "$FILE"
           cat "$FILE"
-          ./roc-src/zig-out/bin/roc "$FILE"
+
+      # Running the test program downloads the platform tarball from GitHub
+      # releases, and that download flakes: 2026-09-15's macos_x86_64 leg died
+      # on "── ✗ download failed ── ... Error: HttpError" and took the whole
+      # nightly with it. The retry matches that signature only; roc's default
+      # pattern is about Zig dependency fetches and does not cover it.
+      #
+      # The action is pinned to roc-lang/roc 1bf9043 ("ci: stop flaky-retry from
+      # matching real failures"), rather than the ./roc-src copy the build step
+      # uses, so a change to that action in roc cannot alter a nightly run.
+      #
+      # Split by OS because flaky-retry runs `command` through bash on Unix and
+      # `cmd /c` on Windows, which need different path spellings.
+      - name: Run hello_world_test.roc (Unix)
+        if: runner.os != 'Windows'
+        uses: roc-lang/roc/.github/actions/flaky-retry@1bf9043142a49a5290f7897af7a7e6f2c70a6615 # ratchet:exclude
+        with:
+          command: './roc-src/zig-out/bin/roc nightlies-repo/hello_world_test.roc'
+          error_string_contains: 'download failed|Error: HttpError'
+          retry_count: 3
+
+      - name: Run hello_world_test.roc (Windows)
+        if: runner.os == 'Windows'
+        uses: roc-lang/roc/.github/actions/flaky-retry@1bf9043142a49a5290f7897af7a7e6f2c70a6615 # ratchet:exclude
+        with:
+          command: 'roc-src\zig-out\bin\roc.exe nightlies-repo\hello_world_test.roc'
+          error_string_contains: 'download failed|Error: HttpError'
+          retry_count: 3
 
       - name: build file name
         run: echo "RELEASE_FOLDER_NAME=roc_nightly-${{ matrix.artifact_name }}-$DATE-$SHA" >> $GITHUB_ENV
@@ -383,6 +462,7 @@ jobs:
         with:
           name: playground.wasm.zst
           path: roc-src/zig-out/lib/playground/playground.wasm.zst
+          if-no-files-found: error
           retention-days: 4
 
       - name: Build REPL wasm archive
@@ -397,6 +477,7 @@ jobs:
         with:
           name: repl.wasm.zst
           path: roc-src/zig-out/lib/repl/repl.wasm.zst
+          if-no-files-found: error
           retention-days: 4
 
       - name: Build roc compiler wasm archive
@@ -411,6 +492,7 @@ jobs:
         with:
           name: echo.wasm.zst
           path: roc-src/zig-out/lib/echo/echo.wasm.zst
+          if-no-files-found: error
           retention-days: 4
 
   package-source:
@@ -475,14 +557,26 @@ jobs:
 
   publish-release:
     name: Publish release to GitHub
-    if: github.event_name != 'pull_request'
+    # One platform failing to build must not sink the whole nightly: the
+    # archives that did build are still worth shipping, and a missing one is
+    # better than nothing at all for that day. So instead of inheriting the
+    # default "skip if any dependency failed", this job runs as long as the
+    # run was not cancelled and resolve-roc-ref itself produced a tag; the
+    # already_released guard the build jobs use has to be repeated here for
+    # the same reason. Which archives actually exist is decided below, from
+    # what was uploaded. The failed build leg still shows up red, so the run
+    # as a whole is still reported as failed.
+    if: >-
+      ${{ !cancelled()
+        && github.event_name != 'pull_request'
+        && needs.resolve-roc-ref.result == 'success'
+        && needs.resolve-roc-ref.outputs.already_released != 'true' }}
     needs: [resolve-roc-ref, build-and-package, build-wasm-artifacts, package-source]
     runs-on: ubuntu-latest
+    outputs:
+      test_matrix: ${{ steps.built.outputs.test_matrix }}
     permissions:
       contents: write
-      # For the pin PR below. contents: write covers creating its branch and
-      # the release; opening and closing the PR itself needs this.
-      pull-requests: write
     env:
       SHA: ${{ needs.resolve-roc-ref.outputs.sha }}
       TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
@@ -495,6 +589,56 @@ jobs:
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # ratchet:actions/download-artifact@v5.0.0
         with:
           path: ./artifacts
+
+      # Because this job now runs even when a build leg failed, it has to work
+      # out for itself which platforms made it into ./artifacts, warn about the
+      # ones that did not, and refuse to publish a release with no binaries at
+      # all. The list it produces also drives the smoke-test matrix below, so
+      # those don't try to download an archive that was never released.
+      - name: Determine which archives were built
+        id: built
+        run: |
+          set -euo pipefail
+
+          built=()
+          for platform in macos_x86_64 macos_apple_silicon linux_x86_64 linux_arm64 windows_x86_64; do
+            if compgen -G "artifacts/roc_nightly-$platform-*/*" > /dev/null; then
+              built+=("$platform")
+            else
+              echo "::warning::No archive was built for $platform; it will be missing from $TAG."
+            fi
+          done
+
+          if [ ${#built[@]} -eq 0 ]; then
+            echo "::error::No platform archives were built, refusing to publish a release without binaries."
+            exit 1
+          fi
+          echo "Publishing archives for: ${built[*]}"
+
+          for extra in playground.wasm.zst repl.wasm.zst echo.wasm.zst "roc_nightly-source-*"; do
+            compgen -G "artifacts/$extra/*" > /dev/null \
+              || echo "::warning::$extra is missing from $TAG."
+          done
+
+          # Every OS the smoke tests cover, paired with the archive it needs.
+          # Legs whose archive is missing are dropped rather than left to fail
+          # on a 404 download.
+          #- {os: windows-11-arm, artifact_name: windows_arm64}
+          matrix=$(jq -cn --args '
+            [
+              {os: "macos-15-intel", artifact_name: "macos_x86_64"},
+              {os: "macos-15",       artifact_name: "macos_apple_silicon"},
+              {os: "macos-26-intel", artifact_name: "macos_x86_64"},
+              {os: "macos-26",       artifact_name: "macos_apple_silicon"},
+              {os: "ubuntu-22.04",   artifact_name: "linux_x86_64"},
+              {os: "ubuntu-26.04",   artifact_name: "linux_x86_64"},
+              {os: "ubuntu-26.04-arm", artifact_name: "linux_arm64"},
+              {os: "windows-2022",   artifact_name: "windows_x86_64"},
+              {os: "windows-2025",   artifact_name: "windows_x86_64"}
+            ] | map(select(.artifact_name as $a | $ARGS.positional | index($a)))
+            | {include: .}' "${built[@]}")
+          echo "$matrix"
+          echo "test_matrix=$matrix" >> "$GITHUB_OUTPUT"
 
       - name: Create Release with gh CLI
         env:
@@ -510,99 +654,18 @@ jobs:
             --notes "$BODY" \
             --latest=true
 
-      # Keep the repo's copy in sync with the tag that just shipped, so the
-      # next run's smoke test (and anyone reading the repo) sees the version
-      # actually verified to work. Only reachable once gh release create above
-      # succeeded, so a failed release never gets a stale pin proposed.
-      #
-      # This cannot be a plain `git push` to main: main's ruleset requires
-      # changes to arrive through a pull request *and* every commit to carry a
-      # verified signature, and a push from the runner satisfies neither. So
-      # the commit is made on a side branch through GraphQL
-      # createCommitOnBranch, which GitHub signs with its own key, and a PR
-      # proposes it.
-      - name: Open a PR pinning hello_world_test.roc to this nightly
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BASE_BRANCH: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-
-          FILE=hello_world_test.roc
-          PLATFORM_URL=$(grep -oE 'pf:[[:space:]]*platform[[:space:]]*"[^"]*"' "$FILE" | grep -oE '"[^"]*"' | tr -d '"')
-          perl -0777 -pi -e "s|app \[main!\] \{.*?\}|app [main!] {\n\tpf: platform \"$PLATFORM_URL\",\n\troc: \"$TAG\",\n}|s" "$FILE"
-          cat "$FILE"
-
-          if git diff --quiet -- "$FILE"; then
-            echo "$FILE is already pinned to $TAG"
-            exit 0
-          fi
-
-          # One branch per tag, so a rerun of the same nightly reuses its
-          # branch instead of piling up near-identical ones.
-          PR_BRANCH="pin-hello-world-test/$TAG"
-
-          # Yesterday's PR is obsolete the moment this one exists: both edit
-          # the same two lines, and only the newest pin is worth merging.
-          # Closing them keeps the queue at one open PR.
-          for old in $(gh pr list --state open --json number,headRefName \
-                --jq ".[] | select(.headRefName | startswith(\"pin-hello-world-test/\") and . != \"$PR_BRANCH\") | .number"); do
-            echo "Closing superseded pin PR #$old"
-            gh pr close "$old" --delete-branch --comment "Superseded by the pin for $TAG." || true
-          done
-
-          # Branch off main's current tip rather than this run's checkout, so
-          # the PR stays mergeable if main moved while the build ran.
-          BASE_OID=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$BASE_BRANCH" --jq .object.sha)
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$PR_BRANCH" >/dev/null 2>&1; then
-            HEAD_OID=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$PR_BRANCH" --jq .object.sha)
-          else
-            gh api "repos/$GITHUB_REPOSITORY/git/refs" \
-              -f ref="refs/heads/$PR_BRANCH" -f sha="$BASE_OID" >/dev/null
-            HEAD_OID="$BASE_OID"
-          fi
-
-          # createCommitOnBranch takes whole-file contents, base64 encoded, so
-          # there is no merge to do and no signature for us to produce: GitHub
-          # writes and signs the commit itself.
-          jq -n \
-            --arg repo "$GITHUB_REPOSITORY" \
-            --arg branch "$PR_BRANCH" \
-            --arg oid "$HEAD_OID" \
-            --arg msg "Pin hello_world_test.roc to $TAG" \
-            --arg path "$FILE" \
-            --arg contents "$(base64 -w0 "$FILE")" \
-            '{
-              query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid url } } }",
-              variables: {input: {
-                branch: {repositoryNameWithOwner: $repo, branchName: $branch},
-                message: {headline: $msg},
-                expectedHeadOid: $oid,
-                fileChanges: {additions: [{path: $path, contents: $contents}]}
-              }}
-            }' > commit-payload.json
-          gh api graphql --input commit-payload.json
-
-          if [ -n "$(gh pr list --state open --head "$PR_BRANCH" --json number --jq '.[].number')" ]; then
-            echo "PR for $PR_BRANCH already open"
-            exit 0
-          fi
-
-          gh pr create \
-            --base "$BASE_BRANCH" \
-            --head "$PR_BRANCH" \
-            --title "Pin hello_world_test.roc to $TAG" \
-            --body "Automated: [\`$TAG\`](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG) was published and its smoke test passed on every OS, so this pins \`hello_world_test.roc\` to it."
-
-          # Best effort: auto-merge only exists if the repo has it enabled, and
-          # the pin is cosmetic enough that failing the release job over it
-          # would be the wrong trade.
-          gh pr merge "$PR_BRANCH" --squash --auto --delete-branch \
-            || echo "::notice::Could not enable auto-merge on the pin PR; merge it by hand."
-
   test-archives:
     name: Test nightly release archives
-    if: github.event_name != 'pull_request'
+    # A failed build leg does not just skip publish-release, it skips
+    # everything downstream of it: the skip propagates through the whole
+    # dependency graph, so opting publish-release out of it is not enough and
+    # this job has to opt out too. What it needs is only that the release was
+    # actually published; the matrix it gets from there already covers just
+    # the archives that shipped.
+    if: >-
+      ${{ !cancelled()
+        && github.event_name != 'pull_request'
+        && needs.publish-release.result == 'success' }}
     needs: [resolve-roc-ref, publish-release]
     runs-on: ${{ matrix.os }}
     env:
@@ -611,28 +674,10 @@ jobs:
       TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: macos-15-intel
-            artifact_name: macos_x86_64
-          - os: macos-15
-            artifact_name: macos_apple_silicon
-          - os: macos-26-intel
-            artifact_name: macos_x86_64
-          - os: macos-26
-            artifact_name: macos_apple_silicon
-          - os: ubuntu-22.04
-            artifact_name: linux_x86_64
-          - os: ubuntu-26.04
-            artifact_name: linux_x86_64
-          - os: ubuntu-26.04-arm
-            artifact_name: linux_arm64
-          - os: windows-2022
-            artifact_name: windows_x86_64
-          - os: windows-2025
-            artifact_name: windows_x86_64
-          #- os: windows-11-arm
-          #  artifact_name: windows_arm64
+      # Built in publish-release, from the archives that actually shipped: a
+      # platform that failed to build has no archive to smoke test, and a leg
+      # for it would only fail on the download.
+      matrix: ${{ fromJSON(needs.publish-release.outputs.test_matrix) }}
 
     defaults:
       run:
@@ -713,3 +758,120 @@ jobs:
         run: |
           ./${{ env.RELEASE_FOLDER_NAME }}/roc fmt nightlies-repo/hello_world_test.roc
           ./${{ env.RELEASE_FOLDER_NAME }}/roc nightlies-repo/hello_world_test.roc
+
+  pin-nightly:
+    name: Pin hello_world_test.roc to the tested nightly
+    # The pin claims the tag is good, so it waits for the proof: this runs only
+    # once every smoke-test leg passed. test-archives has fail-fast disabled, so
+    # its result is 'success' only when all of them did. The explicit result
+    # checks are again there to opt out of a failed build leg's skip
+    # propagating this far down the graph.
+    # TEMP disabled: hello_world_test.roc is headerless for now.
+    if: >-
+      ${{ false
+        && !cancelled()
+        && github.event_name != 'pull_request'
+        && needs.publish-release.result == 'success'
+        && needs.test-archives.result == 'success' }}
+    needs: [resolve-roc-ref, publish-release, test-archives]
+    runs-on: ubuntu-latest
+    permissions:
+      # contents: write covers creating the PR's branch; opening and closing
+      # the PR itself needs pull-requests: write.
+      contents: write
+      pull-requests: write
+    env:
+      TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
+
+    steps:
+      - name: Checkout nightlies repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
+
+      # Keep the repo's copy in sync with the tag that just shipped, so the
+      # next run's smoke test (and anyone reading the repo) sees the version
+      # actually verified to work.
+      #
+      # This cannot be a plain `git push` to main: main's ruleset requires
+      # changes to arrive through a pull request *and* every commit to carry a
+      # verified signature, and a push from the runner satisfies neither. So
+      # the commit is made on a side branch through GraphQL
+      # createCommitOnBranch, which GitHub signs with its own key, and a PR
+      # proposes it.
+      - name: Open a PR pinning hello_world_test.roc to this nightly
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          FILE=hello_world_test.roc
+          PLATFORM_URL=$(grep -oE 'pf:[[:space:]]*platform[[:space:]]*"[^"]*"' "$FILE" | grep -oE '"[^"]*"' | tr -d '"')
+          perl -0777 -pi -e "s|app \[main!\] \{.*?\}|app [main!] {\n\tpf: platform \"$PLATFORM_URL\",\n\troc: \"$TAG\",\n}|s" "$FILE"
+          cat "$FILE"
+
+          if git diff --quiet -- "$FILE"; then
+            echo "$FILE is already pinned to $TAG"
+            exit 0
+          fi
+
+          # One branch per tag, so a rerun of the same nightly reuses its
+          # branch instead of piling up near-identical ones.
+          PR_BRANCH="pin-hello-world-test/$TAG"
+
+          # Yesterday's PR is obsolete the moment this one exists: both edit
+          # the same two lines, and only the newest pin is worth merging.
+          # Closing them keeps the queue at one open PR.
+          for old in $(gh pr list --state open --json number,headRefName \
+                --jq ".[] | select(.headRefName | startswith(\"pin-hello-world-test/\") and . != \"$PR_BRANCH\") | .number"); do
+            echo "Closing superseded pin PR #$old"
+            gh pr close "$old" --delete-branch --comment "Superseded by the pin for $TAG." || true
+          done
+
+          # Branch off main's current tip rather than this run's checkout, so
+          # the PR stays mergeable if main moved while the build ran.
+          BASE_OID=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$BASE_BRANCH" --jq .object.sha)
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$PR_BRANCH" >/dev/null 2>&1; then
+            HEAD_OID=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$PR_BRANCH" --jq .object.sha)
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/heads/$PR_BRANCH" -f sha="$BASE_OID" >/dev/null
+            HEAD_OID="$BASE_OID"
+          fi
+
+          # createCommitOnBranch takes whole-file contents, base64 encoded, so
+          # there is no merge to do and no signature for us to produce: GitHub
+          # writes and signs the commit itself.
+          jq -n \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg branch "$PR_BRANCH" \
+            --arg oid "$HEAD_OID" \
+            --arg msg "Pin hello_world_test.roc to $TAG" \
+            --arg path "$FILE" \
+            --arg contents "$(base64 -w0 "$FILE")" \
+            '{
+              query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid url } } }",
+              variables: {input: {
+                branch: {repositoryNameWithOwner: $repo, branchName: $branch},
+                message: {headline: $msg},
+                expectedHeadOid: $oid,
+                fileChanges: {additions: [{path: $path, contents: $contents}]}
+              }}
+            }' > commit-payload.json
+          gh api graphql --input commit-payload.json
+
+          if [ -n "$(gh pr list --state open --head "$PR_BRANCH" --json number --jq '.[].number')" ]; then
+            echo "PR for $PR_BRANCH already open"
+            exit 0
+          fi
+
+          gh pr create \
+            --base "$BASE_BRANCH" \
+            --head "$PR_BRANCH" \
+            --title "Pin hello_world_test.roc to $TAG" \
+            --body "Automated: [\`$TAG\`](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG) was published and its smoke test passed on every OS it was built for, so this pins \`hello_world_test.roc\` to it."
+
+          # Best effort: auto-merge only exists if the repo has it enabled, and
+          # the pin is cosmetic enough that failing this job over it would be
+          # the wrong trade.
+          gh pr merge "$PR_BRANCH" --squash --auto --delete-branch \
+            || echo "::notice::Could not enable auto-merge on the pin PR; merge it by hand."
