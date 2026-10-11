@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  ZIG_VERSION: 0.16.0
+  ZIG_VERSION: 0.17.0
 jobs:
   resolve-roc-ref:
     name: Resolve roc commit and date
