@@ -148,6 +148,11 @@ jobs:
           same_sha=""
           same_day=""
           for tag in $tags; do
+            # A ReleaseSafe twin is only published after its regular release,
+            # so it has nothing to add here.
+            case "$tag" in
+              *-safe) continue ;;
+            esac
             case "$tag" in
               *-"$short") [ -n "$same_sha" ] || same_sha="$tag" ;;
             esac
@@ -198,9 +203,16 @@ jobs:
     env:
       SHA: ${{ needs.resolve-roc-ref.outputs.sha }}
       DATE: ${{ needs.resolve-roc-ref.outputs.date }}
+      VARIANT_SUFFIX: ${{ matrix.variant == 'safe' && '-safe' || '' }}
     strategy:
       fail-fast: false
       matrix:
+        # To add an OS, list it here and give it an artifact_name below.
+        os: [macos-15-intel, macos-15, ubuntu-22.04, ubuntu-24.04-arm, windows-2022]
+        # fast is the regular ReleaseFast nightly. safe is ReleaseSafe: Zig's
+        # safety checks stay on, so a compiler bug panics with a message
+        # instead of corrupting memory. It ships as its own `<tag>-safe` release.
+        variant: [fast, safe]
         include:
           - os: macos-15-intel
             artifact_name: macos_x86_64
@@ -265,12 +277,29 @@ jobs:
       # -Dcompiler-version is interpolated here rather than read from $TAG at run
       # time: the command runs inside a composite action, so it must not depend on
       # this job's env reaching the action's own steps.
+      #
+      # build-release is ReleaseFast unless -Doptimize is given. The safe build
+      # reports the same version as the regular one: it is the same compiler, so
+      # app headers pinned to the tag must work with both.
       - name: build release
         uses: ./roc-src/.github/actions/flaky-retry
         with:
-          command: 'cd roc-src && zig build build-release -Dcompiler-version=${{ needs.resolve-roc-ref.outputs.tag }}'
+          command: "cd roc-src && zig build build-release ${{ matrix.variant == 'safe' && '-Doptimize=ReleaseSafe' || '' }} -Dcompiler-version=${{ needs.resolve-roc-ref.outputs.tag }}"
           error_string_contains: 'EndOfStream|build.zig.zon'
           retry_count: 3
+
+      # build-release silently ignored -Doptimize before roc-lang/roc#12801, and
+      # nothing else would notice a "safe" archive that is really ReleaseFast.
+      # The message of Zig's bounds-check panic is only linked in when bounds
+      # checks are compiled in.
+      - name: check that the safe build has safety checks
+        if: matrix.variant == 'safe'
+        run: |
+          bin=./roc-src/zig-out/bin/roc${{ runner.os == 'Windows' && '.exe' || '' }}
+          if ! LC_ALL=C grep -aq 'index out of bounds: index ' "$bin"; then
+            echo "$bin has no bounds-check panic message, so it was not built ReleaseSafe."
+            exit 1
+          fi
 
       - name: check if statically linked (ubuntu)
         if: startsWith(matrix.os, 'ubuntu')
@@ -386,7 +415,7 @@ jobs:
           retry_count: 3
 
       - name: build file name
-        run: echo "RELEASE_FOLDER_NAME=roc_nightly-${{ matrix.artifact_name }}-$DATE-$SHA" >> $GITHUB_ENV
+        run: echo "RELEASE_FOLDER_NAME=roc_nightly-${{ matrix.artifact_name }}-$DATE-$SHA$VARIANT_SUFFIX" >> $GITHUB_ENV
 
       - name: Package release
         run: |
@@ -590,6 +619,18 @@ jobs:
         with:
           path: ./artifacts
 
+      # The ReleaseSafe archives ship as their own `<tag>-safe` release rather
+      # than next to the regular ones: installers such as setup-roc pick a
+      # release's archive by platform name alone, and would find two.
+      - name: Set the safe archives apart
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir safe-artifacts
+          for dir in artifacts/roc_nightly-*-safe.*; do
+            mv "$dir" safe-artifacts/
+          done
+
       # Because this job now runs even when a build leg failed, it has to work
       # out for itself which platforms made it into ./artifacts, warn about the
       # ones that did not, and refuse to publish a release with no binaries at
@@ -601,11 +642,17 @@ jobs:
           set -euo pipefail
 
           built=()
+          built_safe=()
           for platform in macos_x86_64 macos_apple_silicon linux_x86_64 linux_arm64 windows_x86_64; do
             if compgen -G "artifacts/roc_nightly-$platform-*/*" > /dev/null; then
               built+=("$platform")
             else
               echo "::warning::No archive was built for $platform; it will be missing from $TAG."
+            fi
+            if compgen -G "safe-artifacts/roc_nightly-$platform-*/*" > /dev/null; then
+              built_safe+=("$platform")
+            else
+              echo "::warning::No safe archive was built for $platform; it will be missing from $TAG-safe."
             fi
           done
 
@@ -614,17 +661,19 @@ jobs:
             exit 1
           fi
           echo "Publishing archives for: ${built[*]}"
+          echo "Publishing safe archives for: ${built_safe[*]}"
+          echo "safe_count=${#built_safe[@]}" >> "$GITHUB_OUTPUT"
 
           for extra in playground.wasm.zst repl.wasm.zst echo.wasm.zst "roc_nightly-source-*"; do
             compgen -G "artifacts/$extra/*" > /dev/null \
               || echo "::warning::$extra is missing from $TAG."
           done
 
-          # Every OS the smoke tests cover, paired with the archive it needs.
-          # Legs whose archive is missing are dropped rather than left to fail
-          # on a 404 download.
+          # Every OS the smoke tests cover, paired with the archive it needs,
+          # once per variant. Legs whose archive is missing are dropped rather
+          # than left to fail on a 404 download.
           #- {os: windows-11-arm, artifact_name: windows_arm64}
-          matrix=$(jq -cn --args '
+          matrix=$(jq -cn --arg fast "${built[*]}" --arg safe "${built_safe[*]}" '
             [
               {os: "macos-15-intel", artifact_name: "macos_x86_64"},
               {os: "macos-15",       artifact_name: "macos_apple_silicon"},
@@ -635,24 +684,52 @@ jobs:
               {os: "ubuntu-26.04-arm", artifact_name: "linux_arm64"},
               {os: "windows-2022",   artifact_name: "windows_x86_64"},
               {os: "windows-2025",   artifact_name: "windows_x86_64"}
-            ] | map(select(.artifact_name as $a | $ARGS.positional | index($a)))
-            | {include: .}' "${built[@]}")
+            ] as $legs
+            | {fast: $fast, safe: $safe}
+            | [to_entries[] | .key as $variant | (.value | split(" ")) as $built
+                | $legs[] | select(.artifact_name as $a | $built | index($a))
+                | . + {variant: $variant}]
+            | {include: .}')
           echo "$matrix"
           echo "test_matrix=$matrix" >> "$GITHUB_OUTPUT"
 
       - name: Create Release with gh CLI
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SAFE_COUNT: ${{ steps.built.outputs.safe_count }}
         run: |
           BODY="Nightly build of new Roc compiler from roc-lang/roc commit [${{ env.SHA }}](https://github.com/roc-lang/roc/commit/${{ env.SHA }}), the most recent commit on main that landed with a passing CI run.
 
           The \`roc_nightly-source-*\` archives contain the roc-lang/roc source these binaries were built from. GitHub's own \"Source code\" assets below are just this workflow repo."
+
+          if [ "$SAFE_COUNT" != 0 ]; then
+            BODY="$BODY
+
+          A memory-safe (ReleaseSafe) build of this compiler, for tracking down crashes, is in [$TAG-safe](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG-safe)."
+          fi
 
           # Create the release (non-draft, non-prerelease)
           gh release create "$TAG" artifacts/**/* \
             --title "$TAG" \
             --notes "$BODY" \
             --latest=true
+
+      # After the regular release, so a failure here cannot cost the day its
+      # regular nightly. Never "latest": whatever resolves the latest nightly
+      # (setup-roc, `gh release view`) must keep getting the regular build.
+      - name: Create safe release with gh CLI
+        if: steps.built.outputs.safe_count != '0'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BODY="The compiler from [$TAG](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG), built with Zig's ReleaseSafe mode instead of ReleaseFast. Safety checks such as bounds and integer overflow checks stay on, so a compiler bug panics with an error message instead of corrupting memory. It is slower than the regular nightly; use it to track down compiler crashes.
+
+          \`roc version\` reports \`$TAG\`, so apps pinned to that nightly work with this build unchanged. The source archives are attached to [$TAG](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG)."
+
+          gh release create "$TAG-safe" safe-artifacts/*/* \
+            --title "$TAG-safe" \
+            --notes "$BODY" \
+            --latest=false
 
   test-archives:
     name: Test nightly release archives
@@ -672,6 +749,7 @@ jobs:
       SHA: ${{ needs.resolve-roc-ref.outputs.sha }}
       DATE: ${{ needs.resolve-roc-ref.outputs.date }}
       TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
+      VARIANT_SUFFIX: ${{ matrix.variant == 'safe' && '-safe' || '' }}
     strategy:
       fail-fast: false
       # Built in publish-release, from the archives that actually shipped: a
@@ -688,7 +766,7 @@ jobs:
 
     steps:
       - name: build file name
-        run: echo "RELEASE_FOLDER_NAME=roc_nightly-${{ matrix.artifact_name }}-$DATE-$SHA" >> $GITHUB_ENV
+        run: echo "RELEASE_FOLDER_NAME=roc_nightly-${{ matrix.artifact_name }}-$DATE-$SHA$VARIANT_SUFFIX" >> $GITHUB_ENV
 
       - name: Download release archive (Unix)
         if: runner.os != 'Windows'
@@ -696,7 +774,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L -H "Authorization: token $GITHUB_TOKEN" -o "${{ env.RELEASE_FOLDER_NAME }}.tar.gz" \
-            "https://github.com/${{ github.repository }}/releases/download/$TAG/${{ env.RELEASE_FOLDER_NAME }}.tar.gz"
+            "https://github.com/${{ github.repository }}/releases/download/$TAG$VARIANT_SUFFIX/${{ env.RELEASE_FOLDER_NAME }}.tar.gz"
 
       - name: Download release archive (Windows)
         if: runner.os == 'Windows'
@@ -704,7 +782,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L -H "Authorization: token $GITHUB_TOKEN" -o "${{ env.RELEASE_FOLDER_NAME }}.zip" \
-            "https://github.com/${{ github.repository }}/releases/download/$TAG/${{ env.RELEASE_FOLDER_NAME }}.zip"
+            "https://github.com/${{ github.repository }}/releases/download/$TAG$VARIANT_SUFFIX/${{ env.RELEASE_FOLDER_NAME }}.zip"
 
       - name: Print CPU model (Windows)
         if: runner.os == 'Windows'
@@ -737,6 +815,7 @@ jobs:
       # The version is baked in by -Dcompiler-version at build time, so nothing
       # downstream can notice if that flag stops being passed and the binaries
       # silently go back to reporting "release-fast-<sha>". This is that check.
+      # The safe build reports the regular tag too, not its own `-safe` one.
       - name: Check reported version matches the release tag
         run: |
           version_out="$(./${{ env.RELEASE_FOLDER_NAME }}/roc version)"
