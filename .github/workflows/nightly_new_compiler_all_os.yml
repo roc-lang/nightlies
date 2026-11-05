@@ -210,8 +210,9 @@ jobs:
         # To add an OS, list it here and give it an artifact_name below.
         os: [macos-15-intel, macos-15, ubuntu-22.04, ubuntu-24.04-arm, windows-2022]
         # fast is the regular ReleaseFast nightly. safe is ReleaseSafe: Zig's
-        # safety checks stay on, so a compiler bug panics with a message
-        # instead of corrupting memory. It ships as its own `<tag>-safe` release.
+        # safety checks stay on, so seemingly pure Roc code cannot trick a
+        # compiler bug into emitting malicious effectful code; it panics instead.
+        # It ships as its own `<tag>-safe` release.
         variant: [fast, safe]
         include:
           - os: macos-15-intel
@@ -705,7 +706,7 @@ jobs:
           if [ "$SAFE_COUNT" != 0 ]; then
             BODY="$BODY
 
-          A memory-safe (ReleaseSafe) build of this compiler, for tracking down crashes, is in [$TAG-safe](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG-safe)."
+          A memory-safe (ReleaseSafe) build of this compiler, which protects against exploits from seemingly pure Roc code that tricks the compiler into emitting malicious effectful code, is in [$TAG-safe](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG-safe)."
           fi
 
           # Create the release (non-draft, non-prerelease)
@@ -722,7 +723,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BODY="The compiler from [$TAG](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG), built with Zig's ReleaseSafe mode instead of ReleaseFast. Safety checks such as bounds and integer overflow checks stay on, so a compiler bug panics with an error message instead of corrupting memory. It is slower than the regular nightly; use it to track down compiler crashes.
+          BODY="The compiler from [$TAG](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG), built with Zig's ReleaseSafe mode instead of ReleaseFast. Safety checks such as bounds and integer overflow checks stay on. This protects against exploits: seemingly pure Roc code that tricks the compiler into emitting malicious effectful code. With the checks on, such a compiler bug panics instead of silently corrupting memory. It is slower than the regular nightly.
 
           \`roc version\` reports \`$TAG\`, so apps pinned to that nightly work with this build unchanged. The source archives are attached to [$TAG](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG)."
 
