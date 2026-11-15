@@ -245,10 +245,15 @@ jobs:
         with:
           path: nightlies-repo
 
+      # No Zig cache: setup-zig would save whatever roc's build leaves in
+      # .zig-cache to this repo's default-branch cache and restore it into the
+      # next nightly, so one bad roc commit could taint nightlies built after it
+      # was reverted. The cache bought no speed anyway, as roc changes daily: the
+      # first Zig 0.17.1 nightly built cold and took as long as the warm ones.
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # ratchet:mlugg/setup-zig@v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
-          use-cache: true
+          use-cache: false
 
       # temp fix, see https://roc.zulipchat.com/#narrow/channel/395097-compiler-development/topic/CI/near/542085291
       - name: delete llvm-config
@@ -282,8 +287,14 @@ jobs:
       # build-release is ReleaseFast unless -Doptimize is given. The safe build
       # reports the same version as the regular one: it is the same compiler, so
       # app headers pinned to the tag must work with both.
+      #
+      # Every flaky-retry in this workflow is roc-lang/roc's pinned to 1bf9043
+      # ("ci: stop flaky-retry from matching real failures") rather than the
+      # ./roc-src copy: a change to that action in roc cannot alter a nightly run,
+      # and no action definition is taken from the checkout of roc in a job that
+      # can write this repo's default-branch cache.
       - name: build release
-        uses: ./roc-src/.github/actions/flaky-retry
+        uses: roc-lang/roc/.github/actions/flaky-retry@1bf9043142a49a5290f7897af7a7e6f2c70a6615 # ratchet:exclude
         with:
           command: "cd roc-src && zig build build-release ${{ matrix.variant == 'safe' && '-Doptimize=ReleaseSafe' || '' }} -Dcompiler-version=${{ needs.resolve-roc-ref.outputs.tag }}"
           error_string_contains: 'EndOfStream|build.zig.zon'
@@ -393,10 +404,6 @@ jobs:
       # nightly with it. The retry matches that signature only; roc's default
       # pattern is about Zig dependency fetches and does not cover it.
       #
-      # The action is pinned to roc-lang/roc 1bf9043 ("ci: stop flaky-retry from
-      # matching real failures"), rather than the ./roc-src copy the build step
-      # uses, so a change to that action in roc cannot alter a nightly run.
-      #
       # Split by OS because flaky-retry runs `command` through bash on Unix and
       # `cmd /c` on Windows, which need different path spellings.
       - name: Run hello_world_test.roc (Unix)
@@ -475,13 +482,15 @@ jobs:
           ref: ${{ needs.resolve-roc-ref.outputs.sha_full }}
           path: roc-src
 
+      # No Zig cache and a pinned flaky-retry, for the reasons given in
+      # build-and-package.
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # ratchet:mlugg/setup-zig@v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
-          use-cache: true
+          use-cache: false
 
       - name: Build playground wasm archive
-        uses: ./roc-src/.github/actions/flaky-retry
+        uses: roc-lang/roc/.github/actions/flaky-retry@1bf9043142a49a5290f7897af7a7e6f2c70a6615 # ratchet:exclude
         with:
           command: 'cd roc-src && zig build build-playground-wasm-archive -Doptimize=ReleaseSmall -Dcompiler-version=${{ needs.resolve-roc-ref.outputs.tag }}'
           error_string_contains: 'EndOfStream|build.zig.zon'
@@ -496,7 +505,7 @@ jobs:
           retention-days: 4
 
       - name: Build REPL wasm archive
-        uses: ./roc-src/.github/actions/flaky-retry
+        uses: roc-lang/roc/.github/actions/flaky-retry@1bf9043142a49a5290f7897af7a7e6f2c70a6615 # ratchet:exclude
         with:
           command: 'cd roc-src && zig build build-repl-wasm-archive -Doptimize=ReleaseSmall -Dcompiler-version=${{ needs.resolve-roc-ref.outputs.tag }}'
           error_string_contains: 'EndOfStream|build.zig.zon'
@@ -511,7 +520,7 @@ jobs:
           retention-days: 4
 
       - name: Build roc compiler wasm archive
-        uses: ./roc-src/.github/actions/flaky-retry
+        uses: roc-lang/roc/.github/actions/flaky-retry@1bf9043142a49a5290f7897af7a7e6f2c70a6615 # ratchet:exclude
         with:
           command: 'cd roc-src && zig build build-echo-wasm-archive -Doptimize=ReleaseSmall -Dcompiler-version=${{ needs.resolve-roc-ref.outputs.tag }}'
           error_string_contains: 'EndOfStream|build.zig.zon'
