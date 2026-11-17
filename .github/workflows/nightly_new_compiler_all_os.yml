@@ -6,8 +6,8 @@ on:
         description: "Publish even if a nightly was already released today (or this commit was already released). The tag still has to be free: re-releasing the same commit on the same day collides with the existing tag and fails."
         type: boolean
         default: false
-  #schedule:
-  #  - cron: "0 9 * * *"
+  schedule:
+    - cron: "0 9 * * *"
 
 name: Nightly release for new compiler
 
