@@ -14,6 +14,14 @@ on:
         description: "Publish a versioned release instead of a nightly: this existing roc-lang/roc tag names the release and is reported by `roc version`. The release goes into roc-lang/roc (a prerelease if the tag contains -RC), the ReleaseSafe twin into this repo as <tag>-safe."
         type: string
         default: ""
+      publish:
+        description: "Publish the release. Unchecked, the run builds and packages everything and leaves the archives as this run's artifacts, for a release made by hand."
+        type: boolean
+        default: true
+      resume_notarization_run:
+        description: "ID of an earlier run of this workflow, for the same commit, whose macOS notarization was still in progress when its jobs stopped. The macOS jobs take that run's signed roc binaries and wait on their existing Apple submissions instead of signing and submitting new ones."
+        type: string
+        default: ""
   #schedule:
   #  - cron: "0 9 * * *"
 
@@ -78,6 +86,7 @@ jobs:
           ROC_REF: ${{ inputs.roc_ref }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           HAS_RELEASE_TOKEN: ${{ secrets.ROC_RELEASE_TOKEN != '' }}
+          PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
         run: |
           set -euo pipefail
 
@@ -90,7 +99,7 @@ jobs:
             fi
             # Checked here so a missing token fails in seconds rather than
             # after every platform has been built.
-            if [ "$HAS_RELEASE_TOKEN" != "true" ]; then
+            if [ "$PUBLISH" = "true" ] && [ "$HAS_RELEASE_TOKEN" != "true" ]; then
               echo "::error::Publishing release_tag into $ROC_REPO needs the ROC_RELEASE_TOKEN secret (a token with Contents: read and write on $ROC_REPO); this workflow's GITHUB_TOKEN can only write to $GITHUB_REPOSITORY."
               exit 1
             fi
@@ -284,6 +293,9 @@ jobs:
     # it no longer takes a skipped or failed build here as a reason to skip.
     if: github.event_name == 'pull_request' || needs.resolve-roc-ref.outputs.already_released != 'true'
     runs-on: ${{ matrix.os }}
+    permissions:
+      # Reads an earlier run's signed binaries when resume_notarization_run is set.
+      actions: read
     env:
       ARCHIVE_PREFIX: ${{ needs.resolve-roc-ref.outputs.archive_prefix }}
       ARCHIVE_VERSION: ${{ needs.resolve-roc-ref.outputs.archive_version }}
@@ -451,6 +463,247 @@ jobs:
             echo "Looks like the nightly build has a new dynamic dependency, we want Roc to be super easy to install, so it should only depend on libraries that ship with macOS."
             echo "Unexpected dependencies:"
             echo "$unexpected"
+            exit 1
+          fi
+
+      # Developer ID signing plus notarization is what lets a downloaded roc
+      # run without Gatekeeper calling it malware. Notarization requires the
+      # hardened runtime, and under it roc's in-process code loading (pages
+      # written, then switched to executable with mprotect) needs the
+      # allow-unsigned-executable-memory entitlement. PR runs skip this: the
+      # build is what they exercise, and notarizing every PR would queue
+      # Apple submissions for binaries nobody downloads.
+      #
+      # Apple can hold a submission for hours. The signed binary and its
+      # submission ID are uploaded before the wait, so when a job stops while
+      # Apple is still deciding, a later run given resume_notarization_run
+      # waits on that same submission for that same binary rather than
+      # sending a new binary to the back of Apple's queue.
+      - name: Download earlier signed roc (macOS)
+        if: runner.os == 'macOS' && github.event_name != 'pull_request' && inputs.resume_notarization_run != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: signed-roc-${{ matrix.artifact_name }}-${{ matrix.variant }}
+          path: ${{ runner.temp }}/earlier-signed-roc
+          run-id: ${{ inputs.resume_notarization_run }}
+          github-token: ${{ github.token }}
+
+      - name: Sign roc and submit it for notarization (macOS)
+        id: notarization-submit
+        if: runner.os == 'macOS' && github.event_name != 'pull_request'
+        env:
+          RESUME_RUN: ${{ inputs.resume_notarization_run }}
+          SHA_FULL: ${{ needs.resolve-roc-ref.outputs.sha_full }}
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+          MACOS_CI_KEYCHAIN_PWD: ${{ secrets.MACOS_CI_KEYCHAIN_PWD }}
+          APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER: ${{ secrets.APPLE_NOTARIZATION_ISSUER }}
+        run: |
+          set -euo pipefail
+          bin=./roc-src/zig-out/bin/roc
+          signed="$RUNNER_TEMP/signed-roc"
+          mkdir -p "$signed"
+
+          if [ -n "$RESUME_RUN" ]; then
+            earlier="$RUNNER_TEMP/earlier-signed-roc"
+            earlier_sha=$(cat "$earlier/commit")
+            if [ "$earlier_sha" != "$SHA_FULL" ]; then
+              echo "::error::Run $RESUME_RUN signed roc from $earlier_sha, but this run builds $SHA_FULL."
+              exit 1
+            fi
+            cp "$earlier/roc" "$bin"
+            chmod +x "$bin"
+            codesign --verify --strict --verbose=2 "$bin"
+            cp "$earlier/roc" "$earlier/commit" "$earlier/submission-id" "$signed/"
+            echo "Waiting on submission $(cat "$signed/submission-id") from run $RESUME_RUN"
+            exit 0
+          fi
+
+          work="$RUNNER_TEMP/macos-signing"
+          mkdir -p "$work"
+          keychain="$work/signing.keychain-db"
+
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$work/certificate.p12"
+          security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$keychain"
+          security import "$work/certificate.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$MACOS_CI_KEYCHAIN_PWD" "$keychain" > /dev/null
+          # codesign builds the certificate chain from the search list, so the
+          # keychain holding the Developer ID intermediate has to be on it.
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$work/certificate.p12"
+
+          cat > "$work/entitlements.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+
+          codesign --force --options runtime --timestamp \
+            --entitlements "$work/entitlements.plist" \
+            --keychain "$keychain" -s "$MACOS_CERTIFICATE_NAME" "$bin"
+          codesign --verify --strict --verbose=2 "$bin"
+          codesign -d --entitlements - "$bin"
+
+          security list-keychains -d user -s $(security list-keychains -d user | tr -d '"' | grep -v "$keychain")
+          security delete-keychain "$keychain"
+
+          printf '%s' "$APPLE_NOTARIZATION_KEY" > "$work/notarization_key.p8"
+          ditto -c -k --keepParent "$bin" "$work/roc.zip"
+          id=""
+          for attempt in 1 2 3 4 5; do
+            if submitted=$(xcrun notarytool submit "$work/roc.zip" \
+                --key "$work/notarization_key.p8" \
+                --key-id "$APPLE_NOTARIZATION_KEY_ID" \
+                --issuer "$APPLE_NOTARIZATION_ISSUER" \
+                --output-format plist); then
+              id=$(plutil -extract id raw -o - - <<<"$submitted")
+              break
+            fi
+            echo "Upload attempt $attempt failed; retrying."
+            sleep 30
+          done
+          rm "$work/notarization_key.p8"
+          if [ -z "$id" ]; then
+            echo "::error::Could not upload roc to Apple's notarization service."
+            exit 1
+          fi
+          echo "Submission $id"
+          cp "$bin" "$signed/roc"
+          printf '%s' "$SHA_FULL" > "$signed/commit"
+          printf '%s' "$id" > "$signed/submission-id"
+
+      - name: Keep signed roc and its submission (macOS)
+        if: runner.os == 'macOS' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-roc-${{ matrix.artifact_name }}-${{ matrix.variant }}
+          path: ${{ runner.temp }}/signed-roc
+          retention-days: 14
+          if-no-files-found: error
+
+      # notarytool's own --wait gives up on the first dropped connection while
+      # polling, though the submission carries on at Apple. So the status is
+      # polled here, riding out transient network errors until Apple decides
+      # or 5 hours pass, which keeps the job inside GitHub's 6-hour limit.
+      - name: Wait for notarization (macOS)
+        if: runner.os == 'macOS' && github.event_name != 'pull_request'
+        env:
+          APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER: ${{ secrets.APPLE_NOTARIZATION_ISSUER }}
+        run: |
+          set -euo pipefail
+          id=$(cat "$RUNNER_TEMP/signed-roc/submission-id")
+          key="$RUNNER_TEMP/notarization_key.p8"
+          printf '%s' "$APPLE_NOTARIZATION_KEY" > "$key"
+          notary() {
+            xcrun notarytool "$@" \
+              --key "$key" \
+              --key-id "$APPLE_NOTARIZATION_KEY_ID" \
+              --issuer "$APPLE_NOTARIZATION_ISSUER" \
+              --output-format plist
+          }
+          deadline=$(( $(date +%s) + 5 * 3600 ))
+          status="In Progress"
+          while [ "$status" = "In Progress" ]; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::Notarization of submission $id was still in progress after 5 hours. Rerun this workflow with resume_notarization_run=${{ github.run_id }} to keep waiting on it."
+              exit 1
+            fi
+            if info=$(notary info "$id"); then
+              status=$(plutil -extract status raw -o - - <<<"$info")
+              echo "$(date -u +%H:%M:%S) $status"
+            else
+              echo "Status check failed; retrying."
+            fi
+            if [ "$status" = "In Progress" ]; then
+              sleep 30
+            fi
+          done
+          if [ "$status" != "Accepted" ]; then
+            notary log "$id" || true
+            echo "::error::Notarization of submission $id ended with status '$status'."
+            exit 1
+          fi
+          rm "$key"
+
+      # Checked on the binary that ships, as a downloaded copy would be: the
+      # copy carries the quarantine attribute browsers set, so running it goes
+      # through Gatekeeper. `spctl --type execute` rejects every bare
+      # command-line binary as "not an app", so notarization is checked with
+      # the open-context assessment, which reports the ticket's source.
+      # `roc test` exercises the in-process code loading that needs the
+      # allow-unsigned-executable-memory entitlement under the hardened runtime.
+      - name: Verify signed roc (macOS)
+        if: runner.os == 'macOS' && github.event_name != 'pull_request'
+        env:
+          TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
+        run: |
+          set -euo pipefail
+          bin=./roc-src/zig-out/bin/roc
+          # Output is captured before matching: `codesign ... | grep -q` fails
+          # under pipefail whenever grep exits before codesign finishes writing.
+          codesign --verify --strict --verbose=2 "$bin"
+          entitlements=$(codesign -d --entitlements - --xml "$bin" 2>/dev/null)
+          details=$(codesign -dvv "$bin" 2>&1)
+          echo "$details"
+          if [[ "$entitlements" != *com.apple.security.cs.allow-unsigned-executable-memory* ]]; then
+            echo "::error::The signature lacks the allow-unsigned-executable-memory entitlement."
+            exit 1
+          fi
+          if ! grep -qE '^CodeDirectory .* flags=0x[0-9a-f]+\([^)]*runtime' <<<"$details"; then
+            echo "::error::The signature does not enable the hardened runtime."
+            exit 1
+          fi
+          if ! grep -q '^Timestamp=' <<<"$details"; then
+            echo "::error::The signature has no secure timestamp."
+            exit 1
+          fi
+          assessment=$(spctl --assess --type open --context context:primary-signature -vv "$bin" 2>&1)
+          echo "$assessment"
+          if ! grep -q '^source=Notarized Developer ID$' <<<"$assessment"; then
+            echo "::error::Gatekeeper does not see a notarization ticket for roc."
+            exit 1
+          fi
+
+          downloaded="$RUNNER_TEMP/downloaded-roc/roc"
+          mkdir -p "$(dirname "$downloaded")"
+          cp "$bin" "$downloaded"
+          xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" "$downloaded"
+          version=$("$downloaded" version)
+          echo "$version"
+          if [ "$version" != "Roc compiler version $TAG" ]; then
+            echo "::error::Expected 'Roc compiler version $TAG', got '$version'."
+            exit 1
+          fi
+          for opt in dev interpreter; do
+            out=$("$downloaded" test --no-cache --opt=$opt roc-src/test/cli/AllPassTests.roc 2>&1)
+            echo "$out"
+            if ! grep -q 'All (3) tests passed' <<<"$out"; then
+              echo "::error::roc test --opt=$opt did not pass under the hardened runtime."
+              exit 1
+            fi
+          done
+
+      - name: Verify roc version
+        if: github.event_name != 'pull_request'
+        env:
+          TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
+        run: |
+          version=$(./roc-src/zig-out/bin/roc${{ runner.os == 'Windows' && '.exe' || '' }} version | tr -d '\r')
+          echo "$version"
+          if [ "$version" != "Roc compiler version $TAG" ]; then
+            echo "::error::Expected 'Roc compiler version $TAG', got '$version'."
             exit 1
           fi
 
@@ -690,12 +943,18 @@ jobs:
     # already_released guard the build jobs use has to be repeated here for
     # the same reason. Which archives actually exist is decided below, from
     # what was uploaded. The failed build leg still shows up red, so the run
-    # as a whole is still reported as failed.
+    # as a whole is still reported as failed. A versioned release is the
+    # exception: it ships only when every build leg and every check passed.
     if: >-
       ${{ !cancelled()
         && github.event_name != 'pull_request'
+        && (github.event_name != 'workflow_dispatch' || inputs.publish)
         && needs.resolve-roc-ref.result == 'success'
-        && needs.resolve-roc-ref.outputs.already_released != 'true' }}
+        && needs.resolve-roc-ref.outputs.already_released != 'true'
+        && (inputs.release_tag == ''
+          || (needs.build-and-package.result == 'success'
+            && needs.build-wasm-artifacts.result == 'success'
+            && needs.package-source.result == 'success')) }}
     needs: [resolve-roc-ref, build-and-package, build-wasm-artifacts, package-source]
     runs-on: ubuntu-latest
     outputs:
