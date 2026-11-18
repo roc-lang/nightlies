@@ -513,19 +513,52 @@ jobs:
 
           printf '%s' "$APPLE_NOTARIZATION_KEY" > "$work/notarization_key.p8"
           ditto -c -k --keepParent "$bin" "$work/roc.zip"
-          result=$(xcrun notarytool submit "$work/roc.zip" \
-            --key "$work/notarization_key.p8" \
-            --key-id "$APPLE_NOTARIZATION_KEY_ID" \
-            --issuer "$APPLE_NOTARIZATION_ISSUER" \
-            --wait --timeout 5h --output-format plist)
-          rm "$work/notarization_key.p8"
-          echo "$result"
-          status=$(echo "$result" | plutil -extract status raw -o - -)
-          if [ "$status" != "Accepted" ]; then
-            id=$(echo "$result" | plutil -extract id raw -o - -)
-            echo "::error::Notarization ended with status '$status' (submission $id)."
+          notary() {
+            xcrun notarytool "$@" \
+              --key "$work/notarization_key.p8" \
+              --key-id "$APPLE_NOTARIZATION_KEY_ID" \
+              --issuer "$APPLE_NOTARIZATION_ISSUER" \
+              --output-format plist
+          }
+          # notarytool's own --wait gives up on the first dropped connection
+          # while polling, though the submission carries on at Apple. So the
+          # upload is retried, and the status is polled here, riding out
+          # transient network errors until Apple decides or 5 hours pass.
+          id=""
+          for attempt in 1 2 3 4 5; do
+            if submitted=$(notary submit "$work/roc.zip"); then
+              id=$(plutil -extract id raw -o - - <<<"$submitted")
+              break
+            fi
+            echo "Upload attempt $attempt failed; retrying."
+            sleep 30
+          done
+          if [ -z "$id" ]; then
+            echo "::error::Could not upload roc to Apple's notarization service."
             exit 1
           fi
+          echo "Submission $id"
+          deadline=$(( $(date +%s) + 5 * 3600 ))
+          status="In Progress"
+          while [ "$status" = "In Progress" ]; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::Notarization of submission $id was still in progress after 5 hours."
+              exit 1
+            fi
+            sleep 30
+            if info=$(notary info "$id"); then
+              status=$(plutil -extract status raw -o - - <<<"$info")
+              echo "$(date -u +%H:%M:%S) $status"
+            else
+              echo "Status check failed; retrying."
+            fi
+          done
+          if [ "$status" != "Accepted" ]; then
+            notary log "$id" || true
+            echo "::error::Notarization of submission $id ended with status '$status'."
+            exit 1
+          fi
+          rm "$work/notarization_key.p8"
 
           security list-keychains -d user -s $(security list-keychains -d user | tr -d '"' | grep -v "$keychain")
           security delete-keychain "$keychain"
