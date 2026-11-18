@@ -6,6 +6,14 @@ on:
         description: "Publish even if a nightly was already released today (or this commit was already released). The tag still has to be free: re-releasing the same commit on the same day collides with the existing tag and fails."
         type: boolean
         default: false
+      roc_ref:
+        description: "roc-lang/roc tag, branch or commit to build instead of the newest main commit that landed green. Defaults to release_tag when that is set."
+        type: string
+        default: ""
+      release_tag:
+        description: "Publish a versioned release instead of a nightly: this existing roc-lang/roc tag names the release and is reported by `roc version`. The release goes into roc-lang/roc (a prerelease if the tag contains -RC), the ReleaseSafe twin into this repo as <tag>-safe."
+        type: string
+        default: ""
   #schedule:
   #  - cron: "0 9 * * *"
 
@@ -37,6 +45,10 @@ jobs:
       already_released: ${{ steps.green.outputs.already_released }}
       date: ${{ steps.green.outputs.date }}
       tag: ${{ steps.ref.outputs.tag }}
+      release_repo: ${{ steps.ref.outputs.release_repo }}
+      prerelease: ${{ steps.ref.outputs.prerelease }}
+      archive_prefix: ${{ steps.ref.outputs.archive_prefix }}
+      archive_version: ${{ steps.ref.outputs.archive_version }}
 
     steps:
       # Don't build from main's tip: a bypass merge can land a PR whose CI was
@@ -52,6 +64,9 @@ jobs:
       # roc's own Nightly Gate (nightly_gate.yml), which runs the full suite on
       # main and fast-forwards refs/heads/nightly on success. Switch the
       # resolution below to that branch once it starts passing.
+      #
+      # A manual run can name the commit instead (roc_ref, or release_tag for a
+      # versioned release), and then the walk is skipped.
       - name: Resolve newest green roc-lang/roc commit
         id: green
         env:
@@ -60,8 +75,27 @@ jobs:
           # Two API calls per candidate; the walk is normally 1-3 candidates.
           MAX_COMMITS: 50
           FORCE: ${{ inputs.force }}
+          ROC_REF: ${{ inputs.roc_ref }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          HAS_RELEASE_TOKEN: ${{ secrets.ROC_RELEASE_TOKEN != '' }}
         run: |
           set -euo pipefail
+
+          if [ -n "$RELEASE_TAG" ]; then
+            # The tag ends up in release names, archive names and a zig build
+            # command line, so only plain version-like strings are accepted.
+            if ! [[ "$RELEASE_TAG" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+              echo "::error::release_tag '$RELEASE_TAG' must consist of letters, digits, '.', '_' and '-'."
+              exit 1
+            fi
+            # Checked here so a missing token fails in seconds rather than
+            # after every platform has been built.
+            if [ "$HAS_RELEASE_TOKEN" != "true" ]; then
+              echo "::error::Publishing release_tag into $ROC_REPO needs the ROC_RELEASE_TOKEN secret (a token with Contents: read and write on $ROC_REPO); this workflow's GITHUB_TOKEN can only write to $GITHUB_REPOSITORY."
+              exit 1
+            fi
+            [ -n "$ROC_REF" ] || ROC_REF="$RELEASE_TAG"
+          fi
 
           # GitHub Actions' app id, matching the integration_id that roc's
           # ruleset pins `finish` to, so an unrelated check of the same name
@@ -72,6 +106,25 @@ jobs:
           skipped=0
           checked=0
           page=1
+          if [ -n "$ROC_REF" ]; then
+            if ! [[ "$ROC_REF" =~ ^[0-9A-Za-z][0-9A-Za-z._/-]*$ ]]; then
+              echo "::error::roc_ref '$ROC_REF' is not a valid tag, branch or commit name."
+              exit 1
+            fi
+            picked=$(gh api "repos/$ROC_REPO/commits/$ROC_REF" --jq '.sha')
+            echo "pick ${picked:0:7}: roc_ref $ROC_REF"
+          fi
+
+          # A release attaches to its existing roc-lang/roc tag, so the binaries
+          # have to be built from exactly the commit that tag names.
+          if [ -n "$RELEASE_TAG" ]; then
+            tag_sha=$(gh api "repos/$ROC_REPO/commits/refs/tags/$RELEASE_TAG" --jq '.sha')
+            if [ "$tag_sha" != "$picked" ]; then
+              echo "::error::roc_ref $ROC_REF is ${picked:0:7}, but $ROC_REPO tag $RELEASE_TAG is ${tag_sha:0:7}."
+              exit 1
+            fi
+          fi
+
           while [ -z "$picked" ] && [ "$checked" -lt "$MAX_COMMITS" ]; do
             commits=$(gh api "repos/$ROC_REPO/commits?sha=main&per_page=50&page=$page" --jq '.[].sha')
             [ -n "$commits" ] || break
@@ -121,6 +174,17 @@ jobs:
           # midnight boundary. The runner clock is UTC, which is also what the
           # cron schedule above is in.
           DATE=$(date -u "+%Y-%m-%d")
+
+          echo "date=$DATE" >> $GITHUB_OUTPUT
+          echo "sha=$short" >> $GITHUB_OUTPUT
+          echo "sha_full=$picked" >> $GITHUB_OUTPUT
+
+          # The guards below are about nightlies: a versioned release is named
+          # by its tag rather than by date and commit, and is never a repeat.
+          if [ -n "$RELEASE_TAG" ]; then
+            echo "already_released=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
           # Two ways an already-published nightly can come round again, both
           # checked against the existing release tags
@@ -177,20 +241,40 @@ jobs:
           fi
 
           echo "already_released=$already_released" >> $GITHUB_OUTPUT
-          echo "date=$DATE" >> $GITHUB_OUTPUT
-          echo "sha=$short" >> $GITHUB_OUTPUT
-          echo "sha_full=$picked" >> $GITHUB_OUTPUT
 
       - name: Resolve tag
         id: ref
         env:
           SHA: ${{ steps.green.outputs.sha }}
           DATE: ${{ steps.green.outputs.date }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          # The single source of truth for this nightly's identity: it names the
+          # The single source of truth for this release's identity: it names the
           # release, and is baked into the binary via roc's -Dcompiler-version so
           # `roc version` reports the release the user actually downloaded.
-          echo "tag=nightly-$DATE-$SHA" >> $GITHUB_OUTPUT
+          #
+          # A nightly is published here, with archives named
+          # roc_nightly-<platform>-<date>-<sha>. A versioned release is published
+          # into roc-lang/roc on its existing tag, with archives named
+          # roc-<platform>-<tag> like roc's earlier releases. Its ReleaseSafe twin
+          # stays here, because a `<tag>-safe` release in roc-lang/roc would
+          # create a new tag there.
+          if [ -n "$RELEASE_TAG" ]; then
+            echo "tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+            echo "release_repo=roc-lang/roc" >> $GITHUB_OUTPUT
+            case "$RELEASE_TAG" in
+              *-RC*) echo "prerelease=true" >> $GITHUB_OUTPUT ;;
+              *) echo "prerelease=false" >> $GITHUB_OUTPUT ;;
+            esac
+            echo "archive_prefix=roc" >> $GITHUB_OUTPUT
+            echo "archive_version=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          else
+            echo "tag=nightly-$DATE-$SHA" >> $GITHUB_OUTPUT
+            echo "release_repo=$GITHUB_REPOSITORY" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+            echo "archive_prefix=roc_nightly" >> $GITHUB_OUTPUT
+            echo "archive_version=$DATE-$SHA" >> $GITHUB_OUTPUT
+          fi
 
   build-and-package:
     name: build and package nightly release
@@ -201,8 +285,8 @@ jobs:
     if: github.event_name == 'pull_request' || needs.resolve-roc-ref.outputs.already_released != 'true'
     runs-on: ${{ matrix.os }}
     env:
-      SHA: ${{ needs.resolve-roc-ref.outputs.sha }}
-      DATE: ${{ needs.resolve-roc-ref.outputs.date }}
+      ARCHIVE_PREFIX: ${{ needs.resolve-roc-ref.outputs.archive_prefix }}
+      ARCHIVE_VERSION: ${{ needs.resolve-roc-ref.outputs.archive_version }}
       VARIANT_SUFFIX: ${{ matrix.variant == 'safe' && '-safe' || '' }}
     strategy:
       fail-fast: false
@@ -423,7 +507,7 @@ jobs:
           retry_count: 3
 
       - name: build file name
-        run: echo "RELEASE_FOLDER_NAME=roc_nightly-${{ matrix.artifact_name }}-$DATE-$SHA$VARIANT_SUFFIX" >> $GITHUB_ENV
+        run: echo "RELEASE_FOLDER_NAME=$ARCHIVE_PREFIX-${{ matrix.artifact_name }}-$ARCHIVE_VERSION$VARIANT_SUFFIX" >> $GITHUB_ENV
 
       - name: Package release
         run: |
@@ -540,15 +624,17 @@ jobs:
     if: github.event_name == 'pull_request' || needs.resolve-roc-ref.outputs.already_released != 'true'
     runs-on: ubuntu-latest
     env:
-      SHA: ${{ needs.resolve-roc-ref.outputs.sha }}
-      DATE: ${{ needs.resolve-roc-ref.outputs.date }}
+      ARCHIVE_PREFIX: ${{ needs.resolve-roc-ref.outputs.archive_prefix }}
+      ARCHIVE_VERSION: ${{ needs.resolve-roc-ref.outputs.archive_version }}
 
     steps:
-      # GitHub's own "Source code" assets on a release are the source of *this*
+      # GitHub's own "Source code" assets on a nightly are the source of *this*
       # repo at the tag, which is just the workflow, not the compiler that was
       # built. Ship the roc-lang/roc tree at the exact commit these binaries
       # came from, so a release stays buildable even if that commit later
       # disappears from roc-lang/roc (force-push, rewritten history, deleted repo).
+      # A versioned release in roc-lang/roc gets the same archives, so both
+      # kinds of release carry the same set of assets.
       - name: Checkout roc-lang/roc
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
         with:
@@ -557,7 +643,7 @@ jobs:
           path: roc-src
 
       - name: build file name
-        run: echo "SOURCE_FOLDER_NAME=roc_nightly-source-$DATE-$SHA" >> $GITHUB_ENV
+        run: echo "SOURCE_FOLDER_NAME=$ARCHIVE_PREFIX-source-$ARCHIVE_VERSION" >> $GITHUB_ENV
 
       - name: Prepare source folder
         run: |
@@ -619,6 +705,10 @@ jobs:
     env:
       SHA: ${{ needs.resolve-roc-ref.outputs.sha }}
       TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
+      RELEASE_REPO: ${{ needs.resolve-roc-ref.outputs.release_repo }}
+      PRERELEASE: ${{ needs.resolve-roc-ref.outputs.prerelease }}
+      ARCHIVE_PREFIX: ${{ needs.resolve-roc-ref.outputs.archive_prefix }}
+      VERSIONED: ${{ inputs.release_tag != '' }}
 
     steps:
       - name: Checkout nightlies repo
@@ -637,7 +727,7 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           mkdir safe-artifacts
-          for dir in artifacts/roc_nightly-*-safe.*; do
+          for dir in artifacts/"$ARCHIVE_PREFIX"-*-safe.*; do
             mv "$dir" safe-artifacts/
           done
 
@@ -654,12 +744,12 @@ jobs:
           built=()
           built_safe=()
           for platform in macos_x86_64 macos_apple_silicon linux_x86_64 linux_arm64 windows_x86_64; do
-            if compgen -G "artifacts/roc_nightly-$platform-*/*" > /dev/null; then
+            if compgen -G "artifacts/$ARCHIVE_PREFIX-$platform-*/*" > /dev/null; then
               built+=("$platform")
             else
               echo "::warning::No archive was built for $platform; it will be missing from $TAG."
             fi
-            if compgen -G "safe-artifacts/roc_nightly-$platform-*/*" > /dev/null; then
+            if compgen -G "safe-artifacts/$ARCHIVE_PREFIX-$platform-*/*" > /dev/null; then
               built_safe+=("$platform")
             else
               echo "::warning::No safe archive was built for $platform; it will be missing from $TAG-safe."
@@ -674,7 +764,7 @@ jobs:
           echo "Publishing safe archives for: ${built_safe[*]}"
           echo "safe_count=${#built_safe[@]}" >> "$GITHUB_OUTPUT"
 
-          for extra in playground.wasm.zst repl.wasm.zst echo.wasm.zst "roc_nightly-source-*"; do
+          for extra in playground.wasm.zst repl.wasm.zst echo.wasm.zst "$ARCHIVE_PREFIX-source-*"; do
             compgen -G "artifacts/$extra/*" > /dev/null \
               || echo "::warning::$extra is missing from $TAG."
           done
@@ -703,14 +793,26 @@ jobs:
           echo "$matrix"
           echo "test_matrix=$matrix" >> "$GITHUB_OUTPUT"
 
+      # A nightly is a full, "latest" release in this repo. A versioned
+      # release goes into roc-lang/roc on the tag it was built from: this
+      # workflow's GITHUB_TOKEN cannot write there, so it uses
+      # ROC_RELEASE_TOKEN. It is never "latest" (that stays roc's previous
+      # stable release until someone promotes it by hand), and is a prerelease
+      # for an -RC tag. --verify-tag makes gh refuse rather than create the tag.
       - name: Create Release with gh CLI
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ inputs.release_tag != '' && secrets.ROC_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
           SAFE_COUNT: ${{ steps.built.outputs.safe_count }}
         run: |
-          BODY="Nightly build of new Roc compiler from roc-lang/roc commit [${{ env.SHA }}](https://github.com/roc-lang/roc/commit/${{ env.SHA }}), the most recent commit on main that landed with a passing CI run.
+          if [ "$VERSIONED" = "true" ]; then
+            BODY="Roc $TAG, built from roc-lang/roc commit [$SHA](https://github.com/roc-lang/roc/commit/$SHA).
 
-          The \`roc_nightly-source-*\` archives contain the roc-lang/roc source these binaries were built from. GitHub's own \"Source code\" assets below are just this workflow repo."
+          The \`$ARCHIVE_PREFIX-source-*\` archives contain the roc-lang/roc source these binaries were built from."
+          else
+            BODY="Nightly build of new Roc compiler from roc-lang/roc commit [$SHA](https://github.com/roc-lang/roc/commit/$SHA), the most recent commit on main that landed with a passing CI run.
+
+          The \`$ARCHIVE_PREFIX-source-*\` archives contain the roc-lang/roc source these binaries were built from. GitHub's own \"Source code\" assets below are just this workflow repo."
+          fi
 
           if [ "$SAFE_COUNT" != 0 ]; then
             BODY="$BODY
@@ -718,27 +820,42 @@ jobs:
           A memory-safe (ReleaseSafe) build of this compiler, which protects against exploits from seemingly pure Roc code that tricks the compiler into emitting malicious effectful code, is in [$TAG-safe](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG-safe)."
           fi
 
-          # Create the release (non-draft, non-prerelease)
-          gh release create "$TAG" artifacts/**/* \
-            --title "$TAG" \
-            --notes "$BODY" \
-            --latest=true
+          if [ "$VERSIONED" = "true" ]; then
+            gh release create "$TAG" artifacts/**/* \
+              -R "$RELEASE_REPO" \
+              --verify-tag \
+              --title "$TAG" \
+              --notes "$BODY" \
+              --prerelease="$PRERELEASE" \
+              --latest=false
+          else
+            gh release create "$TAG" artifacts/**/* \
+              -R "$RELEASE_REPO" \
+              --title "$TAG" \
+              --notes "$BODY" \
+              --latest=true
+          fi
 
       # After the regular release, so a failure here cannot cost the day its
       # regular nightly. Never "latest": whatever resolves the latest nightly
       # (setup-roc, `gh release view`) must keep getting the regular build.
+      # Always published in this repo, so a versioned release's twin does not
+      # create a `<tag>-safe` tag in roc-lang/roc.
       - name: Create safe release with gh CLI
         if: steps.built.outputs.safe_count != '0'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BODY="The compiler from [$TAG](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG), built with Zig's ReleaseSafe mode instead of ReleaseFast. Safety checks such as bounds and integer overflow checks stay on. This protects against exploits: seemingly pure Roc code that tricks the compiler into emitting malicious effectful code. With the checks on, such a compiler bug panics instead of silently corrupting memory. It is slower than the regular nightly.
+          if [ "$VERSIONED" = "true" ]; then KIND=release; else KIND=nightly; fi
+          BODY="The compiler from [$TAG](https://github.com/$RELEASE_REPO/releases/tag/$TAG), built with Zig's ReleaseSafe mode instead of ReleaseFast. Safety checks such as bounds and integer overflow checks stay on. This protects against exploits: seemingly pure Roc code that tricks the compiler into emitting malicious effectful code. With the checks on, such a compiler bug panics instead of silently corrupting memory. It is slower than the regular $KIND.
 
-          \`roc version\` reports \`$TAG\`, so apps pinned to that nightly work with this build unchanged. The source archives are attached to [$TAG](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG)."
+          \`roc version\` reports \`$TAG\`, so apps pinned to that $KIND work with this build unchanged. The source archives are attached to [$TAG](https://github.com/$RELEASE_REPO/releases/tag/$TAG)."
 
           gh release create "$TAG-safe" safe-artifacts/*/* \
+            -R "$GITHUB_REPOSITORY" \
             --title "$TAG-safe" \
             --notes "$BODY" \
+            --prerelease="$PRERELEASE" \
             --latest=false
 
   test-archives:
@@ -756,10 +873,12 @@ jobs:
     needs: [resolve-roc-ref, publish-release]
     runs-on: ${{ matrix.os }}
     env:
-      SHA: ${{ needs.resolve-roc-ref.outputs.sha }}
-      DATE: ${{ needs.resolve-roc-ref.outputs.date }}
+      ARCHIVE_PREFIX: ${{ needs.resolve-roc-ref.outputs.archive_prefix }}
+      ARCHIVE_VERSION: ${{ needs.resolve-roc-ref.outputs.archive_version }}
       TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
       VARIANT_SUFFIX: ${{ matrix.variant == 'safe' && '-safe' || '' }}
+      # The safe twin is always in this repo; see publish-release.
+      DOWNLOAD_REPO: ${{ matrix.variant == 'safe' && github.repository || needs.resolve-roc-ref.outputs.release_repo }}
     strategy:
       fail-fast: false
       # Built in publish-release, from the archives that actually shipped: a
@@ -776,7 +895,7 @@ jobs:
 
     steps:
       - name: build file name
-        run: echo "RELEASE_FOLDER_NAME=roc_nightly-${{ matrix.artifact_name }}-$DATE-$SHA$VARIANT_SUFFIX" >> $GITHUB_ENV
+        run: echo "RELEASE_FOLDER_NAME=$ARCHIVE_PREFIX-${{ matrix.artifact_name }}-$ARCHIVE_VERSION$VARIANT_SUFFIX" >> $GITHUB_ENV
 
       - name: Download release archive (Unix)
         if: runner.os != 'Windows'
@@ -784,7 +903,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L -H "Authorization: token $GITHUB_TOKEN" -o "${{ env.RELEASE_FOLDER_NAME }}.tar.gz" \
-            "https://github.com/${{ github.repository }}/releases/download/$TAG$VARIANT_SUFFIX/${{ env.RELEASE_FOLDER_NAME }}.tar.gz"
+            "https://github.com/$DOWNLOAD_REPO/releases/download/$TAG$VARIANT_SUFFIX/${{ env.RELEASE_FOLDER_NAME }}.tar.gz"
 
       - name: Download release archive (Windows)
         if: runner.os == 'Windows'
@@ -792,7 +911,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L -H "Authorization: token $GITHUB_TOKEN" -o "${{ env.RELEASE_FOLDER_NAME }}.zip" \
-            "https://github.com/${{ github.repository }}/releases/download/$TAG$VARIANT_SUFFIX/${{ env.RELEASE_FOLDER_NAME }}.zip"
+            "https://github.com/$DOWNLOAD_REPO/releases/download/$TAG$VARIANT_SUFFIX/${{ env.RELEASE_FOLDER_NAME }}.zip"
 
       - name: Print CPU model (Windows)
         if: runner.os == 'Windows'
