@@ -454,6 +454,77 @@ jobs:
             exit 1
           fi
 
+      # Developer ID signing plus notarization is what lets a downloaded roc
+      # run without Gatekeeper calling it malware. Notarization requires the
+      # hardened runtime, and under it roc's in-process code loading (pages
+      # written, then switched to executable with mprotect) needs the
+      # allow-unsigned-executable-memory entitlement. PR runs skip this: the
+      # build is what they exercise, and notarizing every PR would queue
+      # Apple submissions for binaries nobody downloads.
+      - name: Sign and notarize roc (macOS)
+        if: runner.os == 'macOS' && github.event_name != 'pull_request'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+          MACOS_CI_KEYCHAIN_PWD: ${{ secrets.MACOS_CI_KEYCHAIN_PWD }}
+          APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER: ${{ secrets.APPLE_NOTARIZATION_ISSUER }}
+        run: |
+          set -euo pipefail
+          bin=./roc-src/zig-out/bin/roc
+          work="$RUNNER_TEMP/macos-signing"
+          mkdir -p "$work"
+          keychain="$work/signing.keychain-db"
+
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$work/certificate.p12"
+          security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$keychain"
+          security import "$work/certificate.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$MACOS_CI_KEYCHAIN_PWD" "$keychain" > /dev/null
+          # codesign builds the certificate chain from the search list, so the
+          # keychain holding the Developer ID intermediate has to be on it.
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$work/certificate.p12"
+
+          cat > "$work/entitlements.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+
+          codesign --force --options runtime --timestamp \
+            --entitlements "$work/entitlements.plist" \
+            --keychain "$keychain" -s "$MACOS_CERTIFICATE_NAME" "$bin"
+          codesign --verify --strict --verbose=2 "$bin"
+          codesign -d --entitlements - "$bin"
+
+          printf '%s' "$APPLE_NOTARIZATION_KEY" > "$work/notarization_key.p8"
+          ditto -c -k --keepParent "$bin" "$work/roc.zip"
+          result=$(xcrun notarytool submit "$work/roc.zip" \
+            --key "$work/notarization_key.p8" \
+            --key-id "$APPLE_NOTARIZATION_KEY_ID" \
+            --issuer "$APPLE_NOTARIZATION_ISSUER" \
+            --wait --timeout 2h --output-format plist)
+          rm "$work/notarization_key.p8"
+          echo "$result"
+          status=$(echo "$result" | plutil -extract status raw -o - -)
+          if [ "$status" != "Accepted" ]; then
+            id=$(echo "$result" | plutil -extract id raw -o - -)
+            echo "::error::Notarization ended with status '$status' (submission $id)."
+            exit 1
+          fi
+
+          security list-keychains -d user -s $(security list-keychains -d user | tr -d '"' | grep -v "$keychain")
+          security delete-keychain "$keychain"
+
       - name: check if statically linked (Windows)
         if: startsWith(matrix.os, 'windows')
         shell: powershell
