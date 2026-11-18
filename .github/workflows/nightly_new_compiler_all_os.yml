@@ -530,6 +530,56 @@ jobs:
           security list-keychains -d user -s $(security list-keychains -d user | tr -d '"' | grep -v "$keychain")
           security delete-keychain "$keychain"
 
+      # Checked on the binary that ships, as a downloaded copy would be: the
+      # copy carries the quarantine attribute browsers set, so running it goes
+      # through Gatekeeper. `spctl --type execute` rejects every bare
+      # command-line binary as "not an app", so notarization is checked with
+      # the open-context assessment, which reports the ticket's source.
+      # `roc test` exercises the in-process code loading that needs the
+      # allow-unsigned-executable-memory entitlement under the hardened runtime.
+      - name: Verify signed roc (macOS)
+        if: runner.os == 'macOS' && github.event_name != 'pull_request'
+        env:
+          TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
+        run: |
+          set -euo pipefail
+          bin=./roc-src/zig-out/bin/roc
+          codesign --verify --strict --verbose=2 "$bin"
+          codesign -d --entitlements - --xml "$bin" | grep -q 'com.apple.security.cs.allow-unsigned-executable-memory'
+          codesign -dvv "$bin" 2>&1 | grep -q '^flags=.*(runtime)'
+          codesign -dvv "$bin" 2>&1 | grep -q '^Timestamp='
+          assessment=$(spctl --assess --type open --context context:primary-signature -vv "$bin" 2>&1)
+          echo "$assessment"
+          echo "$assessment" | grep -q '^source=Notarized Developer ID$'
+
+          downloaded="$RUNNER_TEMP/downloaded-roc/roc"
+          mkdir -p "$(dirname "$downloaded")"
+          cp "$bin" "$downloaded"
+          xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" "$downloaded"
+          version=$("$downloaded" version)
+          echo "$version"
+          if [ "$version" != "Roc compiler version $TAG" ]; then
+            echo "::error::Expected 'Roc compiler version $TAG', got '$version'."
+            exit 1
+          fi
+          for opt in dev interpreter; do
+            out=$("$downloaded" test --no-cache --opt=$opt roc-src/test/cli/AllPassTests.roc 2>&1)
+            echo "$out"
+            echo "$out" | grep -q 'All (3) tests passed'
+          done
+
+      - name: Verify roc version
+        if: github.event_name != 'pull_request'
+        env:
+          TAG: ${{ needs.resolve-roc-ref.outputs.tag }}
+        run: |
+          version=$(./roc-src/zig-out/bin/roc${{ runner.os == 'Windows' && '.exe' || '' }} version | tr -d '\r')
+          echo "$version"
+          if [ "$version" != "Roc compiler version $TAG" ]; then
+            echo "::error::Expected 'Roc compiler version $TAG', got '$version'."
+            exit 1
+          fi
+
       - name: check if statically linked (Windows)
         if: startsWith(matrix.os, 'windows')
         shell: powershell
@@ -766,13 +816,18 @@ jobs:
     # already_released guard the build jobs use has to be repeated here for
     # the same reason. Which archives actually exist is decided below, from
     # what was uploaded. The failed build leg still shows up red, so the run
-    # as a whole is still reported as failed.
+    # as a whole is still reported as failed. A versioned release is the
+    # exception: it ships only when every build leg and every check passed.
     if: >-
       ${{ !cancelled()
         && github.event_name != 'pull_request'
         && (github.event_name != 'workflow_dispatch' || inputs.publish)
         && needs.resolve-roc-ref.result == 'success'
-        && needs.resolve-roc-ref.outputs.already_released != 'true' }}
+        && needs.resolve-roc-ref.outputs.already_released != 'true'
+        && (inputs.release_tag == ''
+          || (needs.build-and-package.result == 'success'
+            && needs.build-wasm-artifacts.result == 'success'
+            && needs.package-source.result == 'success')) }}
     needs: [resolve-roc-ref, build-and-package, build-wasm-artifacts, package-source]
     runs-on: ubuntu-latest
     outputs:
