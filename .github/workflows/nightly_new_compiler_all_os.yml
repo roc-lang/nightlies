@@ -544,13 +544,30 @@ jobs:
         run: |
           set -euo pipefail
           bin=./roc-src/zig-out/bin/roc
+          # Output is captured before matching: `codesign ... | grep -q` fails
+          # under pipefail whenever grep exits before codesign finishes writing.
           codesign --verify --strict --verbose=2 "$bin"
-          codesign -d --entitlements - --xml "$bin" | grep -q 'com.apple.security.cs.allow-unsigned-executable-memory'
-          codesign -dvv "$bin" 2>&1 | grep -q '^flags=.*(runtime)'
-          codesign -dvv "$bin" 2>&1 | grep -q '^Timestamp='
+          entitlements=$(codesign -d --entitlements - --xml "$bin" 2>/dev/null)
+          details=$(codesign -dvv "$bin" 2>&1)
+          echo "$details"
+          if [[ "$entitlements" != *com.apple.security.cs.allow-unsigned-executable-memory* ]]; then
+            echo "::error::The signature lacks the allow-unsigned-executable-memory entitlement."
+            exit 1
+          fi
+          if ! grep -qE '^CodeDirectory .* flags=0x[0-9a-f]+\([^)]*runtime' <<<"$details"; then
+            echo "::error::The signature does not enable the hardened runtime."
+            exit 1
+          fi
+          if ! grep -q '^Timestamp=' <<<"$details"; then
+            echo "::error::The signature has no secure timestamp."
+            exit 1
+          fi
           assessment=$(spctl --assess --type open --context context:primary-signature -vv "$bin" 2>&1)
           echo "$assessment"
-          echo "$assessment" | grep -q '^source=Notarized Developer ID$'
+          if ! grep -q '^source=Notarized Developer ID$' <<<"$assessment"; then
+            echo "::error::Gatekeeper does not see a notarization ticket for roc."
+            exit 1
+          fi
 
           downloaded="$RUNNER_TEMP/downloaded-roc/roc"
           mkdir -p "$(dirname "$downloaded")"
@@ -565,7 +582,10 @@ jobs:
           for opt in dev interpreter; do
             out=$("$downloaded" test --no-cache --opt=$opt roc-src/test/cli/AllPassTests.roc 2>&1)
             echo "$out"
-            echo "$out" | grep -q 'All (3) tests passed'
+            if ! grep -q 'All (3) tests passed' <<<"$out"; then
+              echo "::error::roc test --opt=$opt did not pass under the hardened runtime."
+              exit 1
+            fi
           done
 
       - name: Verify roc version
