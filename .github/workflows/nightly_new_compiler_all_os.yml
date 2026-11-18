@@ -517,7 +517,7 @@ jobs:
             --key "$work/notarization_key.p8" \
             --key-id "$APPLE_NOTARIZATION_KEY_ID" \
             --issuer "$APPLE_NOTARIZATION_ISSUER" \
-            --wait --timeout 2h --output-format plist)
+            --wait --timeout 5h --output-format plist)
           rm "$work/notarization_key.p8"
           echo "$result"
           status=$(echo "$result" | plutil -extract status raw -o - -)
