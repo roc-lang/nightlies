@@ -18,6 +18,10 @@ on:
         description: "Publish the release. Unchecked, the run builds and packages everything and leaves the archives as this run's artifacts, for a release made by hand."
         type: boolean
         default: true
+      resume_notarization_run:
+        description: "ID of an earlier run of this workflow, for the same commit, whose macOS notarization was still in progress when its jobs stopped. The macOS jobs take that run's signed roc binaries and wait on their existing Apple submissions instead of signing and submitting new ones."
+        type: string
+        default: ""
   #schedule:
   #  - cron: "0 9 * * *"
 
@@ -289,6 +293,9 @@ jobs:
     # it no longer takes a skipped or failed build here as a reason to skip.
     if: github.event_name == 'pull_request' || needs.resolve-roc-ref.outputs.already_released != 'true'
     runs-on: ${{ matrix.os }}
+    permissions:
+      # Reads an earlier run's signed binaries when resume_notarization_run is set.
+      actions: read
     env:
       ARCHIVE_PREFIX: ${{ needs.resolve-roc-ref.outputs.archive_prefix }}
       ARCHIVE_VERSION: ${{ needs.resolve-roc-ref.outputs.archive_version }}
@@ -466,9 +473,27 @@ jobs:
       # allow-unsigned-executable-memory entitlement. PR runs skip this: the
       # build is what they exercise, and notarizing every PR would queue
       # Apple submissions for binaries nobody downloads.
-      - name: Sign and notarize roc (macOS)
+      #
+      # Apple can hold a submission for hours. The signed binary and its
+      # submission ID are uploaded before the wait, so when a job stops while
+      # Apple is still deciding, a later run given resume_notarization_run
+      # waits on that same submission for that same binary rather than
+      # sending a new binary to the back of Apple's queue.
+      - name: Download earlier signed roc (macOS)
+        if: runner.os == 'macOS' && github.event_name != 'pull_request' && inputs.resume_notarization_run != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: signed-roc-${{ matrix.artifact_name }}-${{ matrix.variant }}
+          path: ${{ runner.temp }}/earlier-signed-roc
+          run-id: ${{ inputs.resume_notarization_run }}
+          github-token: ${{ github.token }}
+
+      - name: Sign roc and submit it for notarization (macOS)
+        id: notarization-submit
         if: runner.os == 'macOS' && github.event_name != 'pull_request'
         env:
+          RESUME_RUN: ${{ inputs.resume_notarization_run }}
+          SHA_FULL: ${{ needs.resolve-roc-ref.outputs.sha_full }}
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
           MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
@@ -479,6 +504,24 @@ jobs:
         run: |
           set -euo pipefail
           bin=./roc-src/zig-out/bin/roc
+          signed="$RUNNER_TEMP/signed-roc"
+          mkdir -p "$signed"
+
+          if [ -n "$RESUME_RUN" ]; then
+            earlier="$RUNNER_TEMP/earlier-signed-roc"
+            earlier_sha=$(cat "$earlier/commit")
+            if [ "$earlier_sha" != "$SHA_FULL" ]; then
+              echo "::error::Run $RESUME_RUN signed roc from $earlier_sha, but this run builds $SHA_FULL."
+              exit 1
+            fi
+            cp "$earlier/roc" "$bin"
+            chmod +x "$bin"
+            codesign --verify --strict --verbose=2 "$bin"
+            cp "$earlier/roc" "$earlier/commit" "$earlier/submission-id" "$signed/"
+            echo "Waiting on submission $(cat "$signed/submission-id") from run $RESUME_RUN"
+            exit 0
+          fi
+
           work="$RUNNER_TEMP/macos-signing"
           mkdir -p "$work"
           keychain="$work/signing.keychain-db"
@@ -511,46 +554,80 @@ jobs:
           codesign --verify --strict --verbose=2 "$bin"
           codesign -d --entitlements - "$bin"
 
+          security list-keychains -d user -s $(security list-keychains -d user | tr -d '"' | grep -v "$keychain")
+          security delete-keychain "$keychain"
+
           printf '%s' "$APPLE_NOTARIZATION_KEY" > "$work/notarization_key.p8"
           ditto -c -k --keepParent "$bin" "$work/roc.zip"
-          notary() {
-            xcrun notarytool "$@" \
-              --key "$work/notarization_key.p8" \
-              --key-id "$APPLE_NOTARIZATION_KEY_ID" \
-              --issuer "$APPLE_NOTARIZATION_ISSUER" \
-              --output-format plist
-          }
-          # notarytool's own --wait gives up on the first dropped connection
-          # while polling, though the submission carries on at Apple. So the
-          # upload is retried, and the status is polled here, riding out
-          # transient network errors until Apple decides or 5 hours pass.
           id=""
           for attempt in 1 2 3 4 5; do
-            if submitted=$(notary submit "$work/roc.zip"); then
+            if submitted=$(xcrun notarytool submit "$work/roc.zip" \
+                --key "$work/notarization_key.p8" \
+                --key-id "$APPLE_NOTARIZATION_KEY_ID" \
+                --issuer "$APPLE_NOTARIZATION_ISSUER" \
+                --output-format plist); then
               id=$(plutil -extract id raw -o - - <<<"$submitted")
               break
             fi
             echo "Upload attempt $attempt failed; retrying."
             sleep 30
           done
+          rm "$work/notarization_key.p8"
           if [ -z "$id" ]; then
             echo "::error::Could not upload roc to Apple's notarization service."
             exit 1
           fi
           echo "Submission $id"
+          cp "$bin" "$signed/roc"
+          printf '%s' "$SHA_FULL" > "$signed/commit"
+          printf '%s' "$id" > "$signed/submission-id"
+
+      - name: Keep signed roc and its submission (macOS)
+        if: runner.os == 'macOS' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-roc-${{ matrix.artifact_name }}-${{ matrix.variant }}
+          path: ${{ runner.temp }}/signed-roc
+          retention-days: 14
+          if-no-files-found: error
+
+      # notarytool's own --wait gives up on the first dropped connection while
+      # polling, though the submission carries on at Apple. So the status is
+      # polled here, riding out transient network errors until Apple decides
+      # or 5 hours pass, which keeps the job inside GitHub's 6-hour limit.
+      - name: Wait for notarization (macOS)
+        if: runner.os == 'macOS' && github.event_name != 'pull_request'
+        env:
+          APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER: ${{ secrets.APPLE_NOTARIZATION_ISSUER }}
+        run: |
+          set -euo pipefail
+          id=$(cat "$RUNNER_TEMP/signed-roc/submission-id")
+          key="$RUNNER_TEMP/notarization_key.p8"
+          printf '%s' "$APPLE_NOTARIZATION_KEY" > "$key"
+          notary() {
+            xcrun notarytool "$@" \
+              --key "$key" \
+              --key-id "$APPLE_NOTARIZATION_KEY_ID" \
+              --issuer "$APPLE_NOTARIZATION_ISSUER" \
+              --output-format plist
+          }
           deadline=$(( $(date +%s) + 5 * 3600 ))
           status="In Progress"
           while [ "$status" = "In Progress" ]; do
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "::error::Notarization of submission $id was still in progress after 5 hours."
+              echo "::error::Notarization of submission $id was still in progress after 5 hours. Rerun this workflow with resume_notarization_run=${{ github.run_id }} to keep waiting on it."
               exit 1
             fi
-            sleep 30
             if info=$(notary info "$id"); then
               status=$(plutil -extract status raw -o - - <<<"$info")
               echo "$(date -u +%H:%M:%S) $status"
             else
               echo "Status check failed; retrying."
+            fi
+            if [ "$status" = "In Progress" ]; then
+              sleep 30
             fi
           done
           if [ "$status" != "Accepted" ]; then
@@ -558,10 +635,7 @@ jobs:
             echo "::error::Notarization of submission $id ended with status '$status'."
             exit 1
           fi
-          rm "$work/notarization_key.p8"
-
-          security list-keychains -d user -s $(security list-keychains -d user | tr -d '"' | grep -v "$keychain")
-          security delete-keychain "$keychain"
+          rm "$key"
 
       # Checked on the binary that ships, as a downloaded copy would be: the
       # copy carries the quarantine attribute browsers set, so running it goes
