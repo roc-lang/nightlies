@@ -14,6 +14,10 @@ on:
         description: "Publish a versioned release instead of a nightly: this existing roc-lang/roc tag names the release and is reported by `roc version`. The release goes into roc-lang/roc (a prerelease if the tag contains -RC), the ReleaseSafe twin into this repo as <tag>-safe."
         type: string
         default: ""
+      publish:
+        description: "Publish the release. Unchecked, the run builds and packages everything and leaves the archives as this run's artifacts, for a release made by hand."
+        type: boolean
+        default: true
   #schedule:
   #  - cron: "0 9 * * *"
 
@@ -78,6 +82,7 @@ jobs:
           ROC_REF: ${{ inputs.roc_ref }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           HAS_RELEASE_TOKEN: ${{ secrets.ROC_RELEASE_TOKEN != '' }}
+          PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
         run: |
           set -euo pipefail
 
@@ -90,7 +95,7 @@ jobs:
             fi
             # Checked here so a missing token fails in seconds rather than
             # after every platform has been built.
-            if [ "$HAS_RELEASE_TOKEN" != "true" ]; then
+            if [ "$PUBLISH" = "true" ] && [ "$HAS_RELEASE_TOKEN" != "true" ]; then
               echo "::error::Publishing release_tag into $ROC_REPO needs the ROC_RELEASE_TOKEN secret (a token with Contents: read and write on $ROC_REPO); this workflow's GITHUB_TOKEN can only write to $GITHUB_REPOSITORY."
               exit 1
             fi
@@ -694,6 +699,7 @@ jobs:
     if: >-
       ${{ !cancelled()
         && github.event_name != 'pull_request'
+        && (github.event_name != 'workflow_dispatch' || inputs.publish)
         && needs.resolve-roc-ref.result == 'success'
         && needs.resolve-roc-ref.outputs.already_released != 'true' }}
     needs: [resolve-roc-ref, build-and-package, build-wasm-artifacts, package-source]
