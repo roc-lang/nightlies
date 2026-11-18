@@ -22,8 +22,8 @@ on:
         description: "ID of an earlier run of this workflow, for the same commit, whose macOS notarization was still in progress when its jobs stopped. The macOS jobs take that run's signed roc binaries and wait on their existing Apple submissions instead of signing and submitting new ones."
         type: string
         default: ""
-  #schedule:
-  #  - cron: "0 9 * * *"
+  schedule:
+    - cron: "0 9 * * *"
 
 name: Nightly release for new compiler
 
