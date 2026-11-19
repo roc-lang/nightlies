@@ -978,6 +978,13 @@ jobs:
         with:
           path: ./artifacts
 
+      # The macOS legs' signed-roc-* artifacts hold a bare signed binary and
+      # its notarization bookkeeping (roc, commit, submission-id) for a rerun
+      # to pick up. They are not release assets, and their identical file
+      # names would collide as release assets anyway.
+      - name: Leave out the signed-roc artifacts
+        run: rm -rf artifacts/signed-roc-*
+
       # The ReleaseSafe archives ship as their own `<tag>-safe` release rather
       # than next to the regular ones: installers such as setup-roc pick a
       # release's archive by platform name alone, and would find two.
