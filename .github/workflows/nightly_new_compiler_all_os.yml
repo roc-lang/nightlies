@@ -85,6 +85,7 @@ jobs:
           FORCE: ${{ inputs.force }}
           ROC_REF: ${{ inputs.roc_ref }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          RESUME_RUN: ${{ inputs.resume_notarization_run }}
           HAS_RELEASE_TOKEN: ${{ secrets.ROC_RELEASE_TOKEN != '' }}
           PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
         run: |
@@ -182,7 +183,15 @@ jobs:
           # guard below and the tag itself agree on one date, even across a
           # midnight boundary. The runner clock is UTC, which is also what the
           # cron schedule above is in.
-          DATE=$(date -u "+%Y-%m-%d")
+          #
+          # A run resuming an earlier run's notarization reuses binaries that
+          # were built with that run's date in their version, so it keeps that
+          # date, which its first job resolved moments after the run started.
+          if [ -n "$RESUME_RUN" ]; then
+            DATE=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_RUN" --jq '.run_started_at[0:10]')
+          else
+            DATE=$(date -u "+%Y-%m-%d")
+          fi
 
           echo "date=$DATE" >> $GITHUB_OUTPUT
           echo "sha=$short" >> $GITHUB_OUTPUT
