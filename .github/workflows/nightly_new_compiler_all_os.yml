@@ -976,6 +976,7 @@ jobs:
       RELEASE_REPO: ${{ needs.resolve-roc-ref.outputs.release_repo }}
       PRERELEASE: ${{ needs.resolve-roc-ref.outputs.prerelease }}
       ARCHIVE_PREFIX: ${{ needs.resolve-roc-ref.outputs.archive_prefix }}
+      ARCHIVE_VERSION: ${{ needs.resolve-roc-ref.outputs.archive_version }}
       VERSIONED: ${{ inputs.release_tag != '' }}
 
     steps:
@@ -1016,20 +1017,36 @@ jobs:
         run: |
           set -euo pipefail
 
+          # download-artifact puts each asset in a directory of the same name.
+          # Validate the staged files for both releases before publishing either:
+          # a successful build job alone doesn't guarantee an immutable release is complete.
+          missing=()
+          check_asset() {
+            local path="$1/$2/$2"
+            if [[ -f "$path" && -s "$path" ]]; then return 0; fi
+            missing+=("$2")
+            return 1
+          }
+
           built=()
           built_safe=()
           for platform in macos_x86_64 macos_apple_silicon linux_x86_64 linux_arm64 windows_x86_64; do
-            if compgen -G "artifacts/$ARCHIVE_PREFIX-$platform-*/*" > /dev/null; then
-              built+=("$platform")
-            else
-              echo "::warning::No archive was built for $platform; it will be missing from $TAG."
-            fi
-            if compgen -G "safe-artifacts/$ARCHIVE_PREFIX-$platform-*/*" > /dev/null; then
-              built_safe+=("$platform")
-            else
-              echo "::warning::No safe archive was built for $platform; it will be missing from $TAG-safe."
-            fi
+            case "$platform" in windows_*) ext=zip ;; *) ext=tar.gz ;; esac
+            stem="$ARCHIVE_PREFIX-$platform-$ARCHIVE_VERSION"
+            if check_asset artifacts "$stem.$ext"; then built+=("$platform"); fi
+            if check_asset safe-artifacts "$stem-safe.$ext"; then built_safe+=("$platform"); fi
           done
+          for extra in playground.wasm.zst repl.wasm.zst echo.wasm.zst "$ARCHIVE_PREFIX-source-$ARCHIVE_VERSION".{tar.gz,zip}; do
+            check_asset artifacts "$extra" || :
+          done
+
+          if (( ${#missing[@]} )); then
+            if [[ "$VERSIONED" == true ]]; then
+              printf '::error::Missing or empty release asset: %s\n' "${missing[@]}"
+              exit 1
+            fi
+            printf '::warning::Missing or empty nightly asset: %s\n' "${missing[@]}"
+          fi
 
           if [ ${#built[@]} -eq 0 ]; then
             echo "::error::No platform archives were built, refusing to publish a release without binaries."
@@ -1038,11 +1055,6 @@ jobs:
           echo "Publishing archives for: ${built[*]}"
           echo "Publishing safe archives for: ${built_safe[*]}"
           echo "safe_count=${#built_safe[@]}" >> "$GITHUB_OUTPUT"
-
-          for extra in playground.wasm.zst repl.wasm.zst echo.wasm.zst "$ARCHIVE_PREFIX-source-*"; do
-            compgen -G "artifacts/$extra/*" > /dev/null \
-              || echo "::warning::$extra is missing from $TAG."
-          done
 
           # Every OS the smoke tests cover, paired with the archive it needs,
           # once per variant. Legs whose archive is missing are dropped rather
